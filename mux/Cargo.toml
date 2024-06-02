@@ -48,6 +48,7 @@ wezterm-ssh = { path = "../wezterm-ssh" }
 wezterm-dynamic = { path = "../wezterm-dynamic" }
 wezterm-term = { path = "../term", features=["use_serde"] }
 flume = "0.10"
+fuzzy-matcher = "0.3"
 
 [target."cfg(windows)".dependencies]
 ntapi = "0.4"

@@ -319,6 +319,7 @@ impl CopyRenderable {
             promise::spawn::spawn(async move {
                 let limit = None;
                 log::trace!("Searching for {pattern:?} in {range:?}");
+
                 let results = pane.search(pattern.clone(), range.clone(), limit).await?;
 
                 let pane_id = pane.pane_id();

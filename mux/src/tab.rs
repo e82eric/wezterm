@@ -1052,18 +1052,32 @@ impl TabInner {
                 let pane = Arc::clone(cursor.leaf_mut().unwrap());
                 let dims = parent_size.unwrap_or_else(|| root_size);
 
+                let clonedPane = Arc::clone(&pane);
                 panes.push(PositionedPane {
                     index,
                     is_active: index == active_idx,
                     is_zoomed: zoomed_id == Some(pane.pane_id()),
-                    left,
-                    top,
+                    left: 1,
+                    top: 0,
                     width: dims.cols as _,
                     height: dims.rows as _,
                     pixel_width: dims.pixel_width as _,
                     pixel_height: dims.pixel_height as _,
                     pane,
                 });
+
+                //panes.push(PositionedPane {
+                //    index,
+                //    is_active: index == active_idx,
+                //    is_zoomed: zoomed_id == Some(clonedPane.pane_id()),
+                //    left: 10,
+                //    top: 15,
+                //    width: (dims.cols - 20) as _,
+                //    height: (dims.rows - 15) as _,
+                //    pixel_width: dims.pixel_width as _,
+                //    pixel_height: dims.pixel_height as _,
+                //    pane: Arc::clone(&clonedPane),
+                //});
             }
 
             match cursor.preorder_next() {

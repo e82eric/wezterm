@@ -30,6 +30,8 @@ use termwiz::surface::{Line, SequenceNo};
 use url::Url;
 use wezterm_dynamic::Value;
 use wezterm_term::color::ColorPalette;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use wezterm_term::{
     Alert, AlertHandler, Clipboard, DownloadHandler, KeyCode, KeyModifiers, MouseEvent,
     SemanticZone, StableRowIndex, Terminal, TerminalConfiguration, TerminalSize,
@@ -662,6 +664,7 @@ impl Pane for LocalPane {
         let mut results = vec![];
         let mut uniq_matches: HashMap<String, usize> = HashMap::new();
 
+        let matcher = SkimMatcherV2::default();
         screen.for_each_logical_line_in_stable_range(range, |sr, lines| {
             if let Some(limit) = limit {
                 if results.len() == limit as usize {
@@ -688,6 +691,23 @@ impl Pane for LocalPane {
             if haystack.is_empty() {
                 return true;
             }
+
+            //let score = matcher.fuzzy_match(&haystack, "eric");
+            //let (score2, indices) = matcher.fuzzy_indices(&haystack.to_string(), "eric").unwrap();
+            if let Some((score, indices)) = matcher.fuzzy_indices(&haystack, "eric") {
+                println!("Lest");
+            }
+
+            //match matcher.fuzzy_indices(&haystack, "eric") {
+                //Ok((score, indices)) => {
+                    //println!("Match found with score {}: {:?}", score, indices);
+                    //// You can proceed with using `score` and `indices`
+                //},
+                //Err(e) => {
+                    //println!("An error occurred: {}", e);
+                    //// Handle the error e.g., by returning from the function
+                //}
+            //}
 
             let haystack = match &pattern {
                 CompiledPattern::CaseInSensitiveString(_) => Cow::Owned(haystack.to_lowercase()),

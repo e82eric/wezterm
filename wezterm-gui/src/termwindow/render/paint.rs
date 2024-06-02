@@ -155,6 +155,44 @@ impl crate::TermWindow {
             }
         }
 
+        //let gl_state = self.render_state.as_ref().unwrap();
+        //let layer = gl_state
+        //    .layer_for_zindex(1)
+        //    .context("layer_for_zindex(0)")?;
+        //let mut layers = layer.quad_allocator();
+
+        //let panes = self.get_panes_to_render();
+        //// Regular window background color
+        //let background = if panes.len() == 1 {
+        //    // If we're the only pane, use the pane's palette
+        //    // to draw the padding background
+        //    panes[0].pane.palette().background
+        //} else {
+        //    self.palette().background
+        //}
+        //.to_linear()
+        //.mul_alpha(self.config.window_background_opacity);
+
+        //self.filled_rectangle(
+        //    &mut layers,
+        //    1,
+        //    euclid::rect(
+        //        100.,
+        //        100.,
+        //        self.dimensions.pixel_width as f32,
+        //        self.dimensions.pixel_height as f32,
+        //    ),
+        //    background,
+        //)
+        //.context("filled_rectangle for window background")?;
+
+        //let mut clonedPane =  panes[0].clone();
+        ////clonedPane.index = 100;
+        //clonedPane.left = clonedPane.left;
+        ////clonedPane.height = 25;
+        ////clonedPane.top = 10;
+        //self.paint_pane2(&clonedPane, &mut layers).context("paint_pane")?;
+
         Ok(())
     }
 
@@ -246,7 +284,7 @@ impl crate::TermWindow {
             .context("filled_rectangle for window background")?;
         }
 
-        for pos in panes {
+        for pos in &panes {
             if pos.is_active {
                 self.update_text_cursor(&pos);
                 if focused {

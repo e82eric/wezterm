@@ -3413,6 +3413,7 @@ dependencies = [
  "filedescriptor",
  "finl_unicode",
  "flume 0.10.14",
+ "fuzzy-matcher",
  "hostname",
  "k9",
  "lazy_static",

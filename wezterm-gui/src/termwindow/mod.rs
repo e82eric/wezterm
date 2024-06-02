@@ -3066,8 +3066,10 @@ impl TermWindow {
                 wezterm_open_url::open_url(link);
             }
             ActivateCommandPalette => {
-                let modal = crate::termwindow::palette::CommandPalette::new(self);
-                self.set_modal(Rc::new(modal));
+                //let modal = crate::termwindow::palette::CommandPalette::new(self);
+                //self.set_modal(Rc::new(modal));
+                let modal2 = palette::EricWindow::new(self);
+                self.set_modal(Rc::new(modal2));
             }
             PromptInputLine(args) => self.show_prompt_input_line(args),
             InputSelector(args) => self.show_input_selector(args),

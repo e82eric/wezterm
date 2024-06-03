@@ -25,10 +25,7 @@ use termwiz::surface::{CursorVisibility, SequenceNo, SEQ_ZERO};
 use unicode_segmentation::*;
 use url::Url;
 use wezterm_term::color::ColorPalette;
-use wezterm_term::{
-    unicode_column_width, Clipboard, KeyCode, KeyModifiers, Line, MouseEvent, SemanticType,
-    StableRowIndex, TerminalSize,
-};
+use wezterm_term::{unicode_column_width, Clipboard, KeyCode, KeyModifiers, Line, MouseEvent, SemanticType, StableRowIndex, TerminalSize, CursorPosition};
 use window::{KeyCode as WKeyCode, Modifiers, WindowOps};
 
 lazy_static::lazy_static! {
@@ -197,6 +194,13 @@ impl CopyOverlay {
             }
             render.viewport = viewport;
         }
+    }
+
+    pub fn select_cell(&self, x: usize, y: StableRowIndex) {
+        let mut render = self.render.lock();
+        render.cursor.x = x;
+        render.cursor.y = y;
+        render.select_to_cursor_pos();
     }
 }
 

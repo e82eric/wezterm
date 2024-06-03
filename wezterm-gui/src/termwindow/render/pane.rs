@@ -1,5 +1,5 @@
 use crate::quad::{HeapQuadAllocator, QuadTrait, TripleLayerQuadAllocator};
-use crate::selection::SelectionRange;
+use crate::selection::{SelectionRange, SelectionX};
 use crate::termwindow::box_model::*;
 use crate::termwindow::render::{
     same_hyperlink, CursorProperties, LineQuadCacheKey, LineQuadCacheValue, LineToEleShapeCacheKey,
@@ -15,10 +15,12 @@ use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::PositionedPane;
 use ordered_float::NotNan;
 use std::time::Instant;
+use termwiz::surface::CursorVisibility;
 use wezterm_dynamic::Value;
 use wezterm_term::color::{ColorAttribute, ColorPalette};
 use wezterm_term::{Line, StableRowIndex};
 use window::color::LinearRgba;
+use window::KeyCode::Select;
 
 impl crate::TermWindow {
     fn paint_pane_box_model(&mut self, pos: &PositionedPane) -> anyhow::Result<()> {
@@ -43,6 +45,11 @@ impl crate::TermWindow {
             return self.paint_pane_box_model(pos);
         }
 
+        let mut viewTopRow = 0;
+        if(topRow - 3 > 0)
+        {
+            viewTopRow = topRow - 3;
+        }
         self.check_for_dirty_lines_and_invalidate_selection(&pos.pane);
         /*
         let zone = {
@@ -89,7 +96,8 @@ impl crate::TermWindow {
         //    + border.left.get() as f32
         //    + (pos.left as f32 * self.render_metrics.cell_size.width as f32) + 100f32;
 
-        let cursor = pos.pane.get_cursor_position();
+        let mut cursor = pos.pane.get_cursor_position();
+        cursor.visibility = CursorVisibility::Hidden;
         if pos.is_active {
             self.prev_cursor.update(&cursor);
         }
@@ -119,7 +127,7 @@ impl crate::TermWindow {
             });
 
         let mut cell_width = self.render_metrics.cell_size.width as f32;
-        dims.cols = ((width - 20.0) / cell_width) as usize;
+        dims.cols = ((width) / cell_width) as usize;
         let cell_height = self.render_metrics.cell_size.height as f32;
         let background_rect = {
             // We want to fill out to the edges of the splits
@@ -190,126 +198,21 @@ impl crate::TermWindow {
             });
         }
 
-        {
-            // If the bell is ringing, we draw another background layer over the
-            // top of this in the configured bell color
-            if let Some(intensity) = self.get_intensity_if_bell_target_ringing(
-                &pos.pane,
-                &config,
-                VisualBellTarget::BackgroundColor,
-            ) {
-                // target background color
-                let LinearRgba(r, g, b, _) = config
-                    .resolved_palette
-                    .visual_bell
-                    .as_deref()
-                    .unwrap_or(&palette.foreground)
-                    .to_linear();
-
-                let background = if window_is_transparent {
-                    // for transparent windows, we fade in the target color
-                    // by adjusting its alpha
-                    LinearRgba::with_components(r, g, b, intensity)
-                } else {
-                    // otherwise We'll interpolate between the background color
-                    // and the the target color
-                    let (r1, g1, b1, a) = palette
-                        .background
-                        .to_linear()
-                        .mul_alpha(config.window_background_opacity)
-                        .tuple();
-                    LinearRgba::with_components(
-                        r1 + (r - r1) * intensity,
-                        g1 + (g - g1) * intensity,
-                        b1 + (b - b1) * intensity,
-                        a,
-                    )
-                };
-                log::trace!("bell color is {:?}", background);
-
-                let mut quad = self
-                    .filled_rectangle(layers, 0, background_rect, background)
-                    .context("filled_rectangle")?;
-
-                quad.set_hsv(if pos.is_active {
-                    None
-                } else {
-                    Some(config.inactive_pane_hsb)
-                });
-            }
-        }
-
         // TODO: we only have a single scrollbar in a single position.
         // We only update it for the active pane, but we should probably
         // do a per-pane scrollbar.  That will require more extensive
         // changes to ScrollHit, mouse positioning, PositionedPane
         // and tab size calculation.
-        if pos.is_active && self.show_scroll_bar {
-            let thumb_y_offset = top_bar_height as usize + border.top.get();
-
-            let min_height = self.min_scroll_bar_height();
-
-            let info = ScrollHit::thumb(
-                &*pos.pane,
-                current_viewport,
-                self.dimensions.pixel_height.saturating_sub(
-                    thumb_y_offset + border.bottom.get() + bottom_bar_height as usize,
-                ),
-                min_height as usize,
-            );
-            let abs_thumb_top = thumb_y_offset + info.top;
-            let thumb_size = info.height;
-            let color = palette.scrollbar_thumb.to_linear();
-
-            // Adjust the scrollbar thumb position
-            let config = &self.config;
-            let padding = self.effective_right_padding(&config) as f32;
-
-            let thumb_x = self.dimensions.pixel_width - padding as usize - border.right.get();
-
-            // Register the scroll bar location
-            self.ui_items.push(UIItem {
-                x: thumb_x,
-                width: padding as usize,
-                y: thumb_y_offset,
-                height: info.top,
-                item_type: UIItemType::AboveScrollThumb,
-            });
-            self.ui_items.push(UIItem {
-                x: thumb_x,
-                width: padding as usize,
-                y: abs_thumb_top,
-                height: thumb_size,
-                item_type: UIItemType::ScrollThumb,
-            });
-            self.ui_items.push(UIItem {
-                x: thumb_x,
-                width: padding as usize,
-                y: abs_thumb_top + thumb_size,
-                height: self
-                    .dimensions
-                    .pixel_height
-                    .saturating_sub(abs_thumb_top + thumb_size),
-                item_type: UIItemType::BelowScrollThumb,
-            });
-
-            self.filled_rectangle(
-                layers,
-                2,
-                euclid::rect(
-                    thumb_x as f32,
-                    abs_thumb_top as f32,
-                    padding,
-                    thumb_size as f32,
-                ),
-                color,
-            )
-                .context("filled_rectangle")?;
-        }
 
         let (selrange, rectangular) = {
             let sel = self.selection(pos.pane.pane_id());
-            (sel.range.clone(), sel.rectangular)
+
+            let sel = SelectionRange::start(crate::selection::SelectionCoordinate {
+                x: SelectionX::Cell(0),
+                y: topRow,
+            })
+                .extend(crate::selection::SelectionCoordinate { x: SelectionX::Cell(dims.cols), y: topRow });
+            (sel, false)
         };
 
         let start = Instant::now();
@@ -325,7 +228,7 @@ impl crate::TermWindow {
             let stable_range = match current_viewport {
                 Some(top) => top..top + dims.viewport_rows as StableRowIndex,
                 //None => dims.physical_top..dims.physical_top + 25 as StableRowIndex,
-                None => topRow..topRow + numberOfRows as StableRowIndex,
+                None => viewTopRow..viewTopRow + numberOfRows as StableRowIndex,
             };
 
             pos.pane
@@ -359,7 +262,7 @@ impl crate::TermWindow {
 
             let mut render = LineRender {
                 term_window: self,
-                selrange,
+                selrange: Some(selrange),
                 rectangular,
                 dims,
                 top_pixel_y,

@@ -20,6 +20,8 @@ use std::cell::{Ref, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use mux::pane::Pane;
+use mux::pane::Pattern::CaseInSensitiveString;
 use termwiz::cell::{Cell, CellAttributes};
 use termwiz::{color, Context};
 use termwiz::color::ColorSpec::TrueColor;
@@ -28,7 +30,8 @@ use termwiz::surface::Line;
 use wezterm_dynamic::{FromDynamic, ToDynamic};
 use wezterm_term::{KeyCode, KeyModifiers, MouseEvent, StableRowIndex};
 use window::color::LinearRgba;
-use window::Modifiers;
+use window::{Modifiers, WindowOps};
+use crate::selection::SelectionX;
 
 struct MatchResults {
     selection: String,
@@ -742,7 +745,8 @@ impl Modal for CommandPalette {
 
 pub struct EricRow {
     pub brief: Cow<'static, str>,
-    pub rowIndex: StableRowIndex
+    pub rowIndex: StableRowIndex,
+    pub first_y: usize
 }
 
 pub struct EricWindow {
@@ -781,24 +785,20 @@ impl EricWindow{
         let mut top_row = self.top_row.borrow_mut();
         let commands = self.commands.borrow();
         *top_row = commands[*row].1.rowIndex;
-
-        //let mut top_row = self.top_row.borrow_mut();
-        //if *row < *top_row {
-        //    *top_row = *row;
-        //}
     }
 
     fn move_down(&self) {
         let mut row = self.selected_row.borrow_mut();
-        *row = row.saturating_add(1);
-        let mut top_row = self.top_row.borrow_mut();
-        let commands = self.commands.borrow();
-        *top_row = commands[*row].1.rowIndex;
-
-        //let mut top_row = self.top_row.borrow_mut();
-        //if *row < *top_row {
-        //    *top_row = *row;
-        //}
+        if(*row + 1 < self.commands.borrow().iter().count())
+        {
+            *row = row.saturating_add(1);
+            let mut top_row = self.top_row.borrow_mut();
+            let commands = self.commands.borrow();
+            if(*row < commands.iter().count())
+            {
+                *top_row = commands[*row].1.rowIndex;
+            }
+        }
     }
 }
 
@@ -811,6 +811,52 @@ impl Modal for EricWindow{
         match (key, mods) {
             (KeyCode::Escape, KeyModifiers::NONE) | (KeyCode::Char('g'), KeyModifiers::CTRL) => {
                 term_window.cancel_modal();
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                let mut row = self.selected_row.borrow_mut();
+                *row = row.saturating_sub(1);
+                let commands = self.commands.borrow();
+                let y = commands[*row].1.rowIndex + 1;
+                let x = commands[*row].1.first_y;
+
+                term_window.cancel_modal();
+
+                if let Some(pane) = term_window.get_active_pane_or_overlay() {
+                    let mut replace_current = false;
+                    if let Some(existing) = pane.downcast_ref::<crate::overlay::CopyOverlay>() {
+                        let mut params = existing.get_params();
+                        params.editing_search = false;
+                        existing.apply_params(params);
+                        replace_current = true;
+                    } else {
+                        let copy = crate::overlay::CopyOverlay::with_pane(
+                            term_window,
+                            &pane,
+                            crate::overlay::CopyModeParams {
+                                pattern: CaseInSensitiveString("".to_string()),
+                                editing_search: false,
+                            },
+                        )?;
+                        let actualCopy = copy.downcast_ref::<crate::overlay::CopyOverlay>();
+                        actualCopy.unwrap().select_cell(x, y);
+
+                        term_window.assign_overlay_for_pane(copy.pane_id(), copy);
+                    }
+                    term_window.pane_state(pane.pane_id())
+                        .overlay
+                        .as_mut()
+                        .map(|overlay| {
+                            overlay.key_table_state.activate(crate::termwindow::keyevent::KeyTableArgs {
+                                name: "copy_mode",
+                                timeout_milliseconds: None,
+                                replace_current,
+                                one_shot: false,
+                                until_unknown: false,
+                                prevent_fallback: false,
+                            });
+                        });
+                }
+
             }
             (KeyCode::UpArrow, KeyModifiers::NONE) | (KeyCode::Char('p'), KeyModifiers::CTRL) => {
                 self.move_up();
@@ -838,7 +884,7 @@ impl Modal for EricWindow{
     fn computed_element(&self, term_window: &mut TermWindow) -> anyhow::Result<Ref<[ComputedElement]>> {
         let font = term_window
             .fonts
-            .command_palette_font()
+            .default_font()
             .expect("to resolve command palette font");
 
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
@@ -864,23 +910,11 @@ impl Modal for EricWindow{
         let selection = selection.as_str();
         let mut elements =
             vec![
-                Element::new(&font, ElementContent::Text(format!("> {selection}_")))
-                    .colors(ElementColors {
-                        border: BorderColor::default(),
-                        bg: LinearRgba::TRANSPARENT.into(),
-                        text: term_window
-                            .config
-                            .command_palette_fg_color
-                            .to_linear()
-                            .into(),
-                    })
-                    .display(DisplayType::Block),
             ];
 
         let matcher = SkimMatcherV2::default();
         let mut ms = self.commands.borrow_mut();
         ms.clear();
-        //self.row_indexes.borrow_mut().clear();
         if(!selection.is_empty()) {
             let pn = term_window.get_active_pane_or_overlay();
             match pn {
@@ -894,10 +928,10 @@ impl Modal for EricWindow{
                             Some(score) => {
                                 let command = EricRow {
                                     brief: Cow::Owned(line.as_str().to_string()),
-                                    rowIndex: _first_row + idx as StableRowIndex
+                                    rowIndex: _first_row + idx as StableRowIndex,
+                                    first_y: 0
                                 };
                                 ms.push((score, command));
-                                //self.row_indexes.borrow_mut().push(_first_row + (idx as StableRowIndex))
                             },
                             None => {}
                         }
@@ -908,8 +942,14 @@ impl Modal for EricWindow{
             ms.sort_by(|a, b| a.0.cmp(&b.0).reverse());
         }
 
-        for (display_idx, c) in ms.iter().take(10).enumerate() {
-            let command = &c.1;
+        let mut top_row = self.top_row.borrow_mut();
+        if(ms.iter().count() > 0)
+        {
+            *top_row = ms[*self.selected_row.borrow()].1.rowIndex;
+        }
+
+        for (display_idx, mut c) in ms.iter_mut().take(10).enumerate() {
+            let mut command = &mut c.1;
             let solid_bg_color: InheritableColor = term_window
                 .config
                 .command_palette_bg_color
@@ -934,26 +974,11 @@ impl Modal for EricWindow{
                 (solid_bg_color.clone(), solid_fg_color.clone())
             };
 
-            //let group = if command.menubar.is_empty() {
-            //    String::new()
-            //} else {
-            //    format!("{}: ", command.menubar.join(" | "))
-            //};
-
-            // DRY if the brief and doc are the same
-            //let label = if command.doc.is_empty()
-            //    || command.brief.to_ascii_lowercase() == command.doc.to_ascii_lowercase()
-            //{
-            //    format!("{group}{}", command.brief)
-            //} else {
-            //    format!("{group}{}. {}", command.brief, command.doc)
-            //};
             let label = command.brief.to_string();
 
             let mut attr = CellAttributes::default();
             if(display_idx == selected_row)
             {
-                //attr.set_background(TrueColor(*term_window.config.command_palette_bg_color));
                 attr.set_foreground(TrueColor(*term_window.config.command_palette_bg_color));
             }
             else {
@@ -961,6 +986,7 @@ impl Modal for EricWindow{
             }
             let mut line = Line::from_text(&label, &attr, 0, None);
             if let Some(pos) = matcher.fuzzy_indices(&label, selection.clone()) {
+                command.first_y = pos.1[0];
                 for p in pos.1 {
                     if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(p) {
                         c.attrs_mut().set_foreground(color::AnsiColor::Red);
@@ -971,16 +997,9 @@ impl Modal for EricWindow{
             } else {
                 //println!("No indices found.");
             }
-            //let mut testLine = Line::from_text("hello", &attr, 0, None);
-            //let attr = CellAttributes::default()
-            //    .set_foreground(color::AnsiColor::Navy)
-            //    .clone();
-            //let c = testLine.cells_mut_for_attr_changes_only().get_mut(1).unwrap();
-            //c.attrs_mut().set_foreground(color::AnsiColor::Red);
 
             let mut row = vec![
                 Element::with_line(&font, &line, &term_window.palette().clone()),
-                //Element::new(&font, ElementContent::Text(label)),
             ];
 
             elements.push(
@@ -1013,12 +1032,153 @@ impl Modal for EricWindow{
         let desired_pixel_width =
             desired_width as f32 * term_window.render_metrics.cell_size.width as f32;
 
-        let element = Element::new(&font, ElementContent::Children(elements))
+        let panel_width = desired_pixel_width as f32 - 15.0;
+        let full_height = ((dimensions.pixel_height as f32) - 65.0);
+        let half_height = full_height / 2.0;
+
+        let panes = term_window.get_panes_to_render();
+        let mut clonedPane = panes[0].clone();
+        let element1 = Element::new(&font, ElementContent::Children(elements))
             .colors(ElementColors {
                 border: BorderColor::new(
                     term_window
                         .config
-                        .command_palette_bg_color
+                        .command_palette_fg_color
+                        .to_linear()
+                        .into(),
+                ),
+                bg: clonedPane.pane.palette().background.to_linear().into(),
+                text: term_window
+                    .config
+                    .command_palette_fg_color
+                    .to_linear()
+                    .into(),
+            })
+            .margin(BoxDimension {
+                left: Dimension::Cells(0.25),
+                right: Dimension::Cells(0.25),
+                top: Dimension::Cells(0.25),
+                bottom: Dimension::Cells(0.25),
+            })
+            .padding(BoxDimension {
+                left: Dimension::Cells(0.25),
+                right: Dimension::Cells(0.25),
+                top: Dimension::Cells(0.25),
+                bottom: Dimension::Cells(0.25),
+            })
+            .border(BoxDimension::new(Dimension::Pixels(2.)))
+            .border_corners(Some(Corners {
+                top_left: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: TOP_LEFT_ROUNDED_CORNER,
+                },
+                top_right: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: TOP_RIGHT_ROUNDED_CORNER,
+                },
+                bottom_left: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: BOTTOM_LEFT_ROUNDED_CORNER,
+                },
+                bottom_right: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: BOTTOM_RIGHT_ROUNDED_CORNER,
+                },
+            })).display(DisplayType::Block)
+            .min_width(Some(Dimension::Pixels(panel_width)))
+            .max_width(Some(Dimension::Pixels(panel_width)))
+            .min_height(Some(Dimension::Pixels(half_height - 100.0)));
+
+        let element2 = Element::new(&font, ElementContent::Children(vec![]))
+            .colors(ElementColors {
+                border: BorderColor::new(
+                    term_window
+                        .config
+                        .command_palette_fg_color
+                        .to_linear()
+                        .into(),
+                ),
+                bg: clonedPane.pane.palette().background.to_linear().into(),
+                text: term_window
+                    .config
+                    .command_palette_fg_color
+                    .to_linear()
+                    .into(),
+            })
+            .margin(BoxDimension {
+                left: Dimension::Cells(0.25),
+                right: Dimension::Cells(0.25),
+                top: Dimension::Cells(0.25),
+                bottom: Dimension::Cells(0.25),
+            })
+            .padding(BoxDimension {
+                left: Dimension::Cells(0.25),
+                right: Dimension::Cells(0.25),
+                top: Dimension::Cells(0.25),
+                bottom: Dimension::Cells(0.25),
+            })
+            .border(BoxDimension::new(Dimension::Pixels(2.)))
+            .border_corners(Some(Corners {
+                top_left: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: TOP_LEFT_ROUNDED_CORNER,
+                },
+                top_right: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: TOP_RIGHT_ROUNDED_CORNER,
+                },
+                bottom_left: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: BOTTOM_LEFT_ROUNDED_CORNER,
+                },
+                bottom_right: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: BOTTOM_RIGHT_ROUNDED_CORNER,
+                },
+            })).display(DisplayType::Block)
+            .min_width(Some(Dimension::Pixels(panel_width)))
+            .max_width(Some(Dimension::Pixels(panel_width)))
+            .min_height(Some(Dimension::Pixels(half_height - 100.0)));
+
+
+        let mut promptElements =
+            vec![
+                Element::new(&font, ElementContent::Text(format!("> {selection}_")))
+                    .colors(ElementColors {
+                        border: BorderColor::default(),
+                        bg: LinearRgba::TRANSPARENT.into(),
+                        text: term_window
+                            .config
+                            .command_palette_fg_color
+                            .to_linear()
+                            .into(),
+                    })
+                    .display(DisplayType::Block),
+            ];
+
+        let element3 = Element::new(&font, ElementContent::Children(promptElements))
+            .colors(ElementColors {
+                border: BorderColor::default(),
+                bg: clonedPane.pane.palette().background.to_linear().into(),
+                text: term_window
+                    .config
+                    .command_palette_fg_color
+                    .to_linear()
+                    .into(),
+            })
+            .colors(ElementColors {
+                border: BorderColor::new(
+                    term_window
+                        .config
+                        .command_palette_fg_color
                         .to_linear()
                         .into(),
                 ),
@@ -1027,6 +1187,57 @@ impl Modal for EricWindow{
                     .command_palette_bg_color
                     .to_linear()
                     .into(),
+                text: term_window
+                    .config
+                    .command_palette_fg_color
+                    .to_linear()
+                    .into(),
+            })
+            .margin(BoxDimension {
+                left: Dimension::Cells(0.25),
+                right: Dimension::Cells(0.25),
+                top: Dimension::Cells(0.25),
+                bottom: Dimension::Cells(0.25),
+            })
+            .padding(BoxDimension {
+                left: Dimension::Cells(0.25),
+                right: Dimension::Cells(0.25),
+                top: Dimension::Cells(0.25),
+                bottom: Dimension::Cells(0.25),
+            })
+            .border(BoxDimension::new(Dimension::Pixels(2.)))
+            .border_corners(Some(Corners {
+                top_left: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: TOP_LEFT_ROUNDED_CORNER,
+                },
+                top_right: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: TOP_RIGHT_ROUNDED_CORNER,
+                },
+                bottom_left: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: BOTTOM_LEFT_ROUNDED_CORNER,
+                },
+                bottom_right: SizedPoly {
+                    width: Dimension::Cells(0.25),
+                    height: Dimension::Cells(0.25),
+                    poly: BOTTOM_RIGHT_ROUNDED_CORNER,
+                },
+            })).display(DisplayType::Block)
+            .min_width(Some(Dimension::Pixels(panel_width)))
+            .max_width(Some(Dimension::Pixels(panel_width)));
+
+        let combined = vec![element2, element1, element3];
+        let element = Element::new(&font, ElementContent::Children(combined))
+            .colors(ElementColors {
+                border: BorderColor::new(
+                    clonedPane.pane.palette().background.to_linear().into(),
+                ),
+                bg: clonedPane.pane.palette().background.to_linear().into(),
                 text: term_window
                     .config
                     .command_palette_fg_color
@@ -1068,7 +1279,8 @@ impl Modal for EricWindow{
                     poly: BOTTOM_RIGHT_ROUNDED_CORNER,
                 },
             }))
-            .min_width(Some(Dimension::Pixels(desired_pixel_width)));
+            .min_width(Some(Dimension::Pixels(desired_pixel_width)))
+            .min_height(Some(Dimension::Pixels(full_height - 200.0)));
 
         let x_adjust = ((avail_pixel_width - padding_left) - desired_pixel_width) / 2.;
 
@@ -1081,7 +1293,7 @@ impl Modal for EricWindow{
             },
             height: DimensionContext {
                 dpi: dimensions.dpi as f32,
-                pixel_max: dimensions.pixel_height as f32,
+                pixel_max: dimensions.pixel_height as f32 / 2.0,
                 pixel_cell: metrics.cell_size.height as f32,
             },
             bounds: euclid::rect(
@@ -1100,11 +1312,10 @@ impl Modal for EricWindow{
 
         let gl_state = term_window.render_state.as_ref().unwrap();
         let layer = gl_state
-            .layer_for_zindex(1)?;
+            .layer_for_zindex(101)?;
         //.context("layer_for_zindex(0)")?;
         let mut layers = layer.quad_allocator();
 
-        let panes = term_window.get_panes_to_render();
         // Regular window background color
         let background = if panes.len() == 1 {
             // If we're the only pane, use the pane's palette
@@ -1116,29 +1327,11 @@ impl Modal for EricWindow{
             .to_linear()
             .mul_alpha(term_window.config.window_background_opacity);
 
-        //term_window.filled_rectangle(
-        //    &mut layers,
-        //    1,
-        //    euclid::rect(
-        //        100.,
-        //        100.,
-        //        term_window.dimensions.pixel_width as f32,
-        //        term_window.dimensions.pixel_height as f32,
-        //    ),
-        //    background,
-        //)?;
-        //.context("filled_rectangle for window background")?;
-
-        let mut clonedPane = panes[0].clone();
-        //clonedPane.index = 100;
         clonedPane.left = clonedPane.left;
-        //clonedPane.height = 25;
-        //clonedPane.top = 10;
+        let top_pixel_y = top_bar_height + padding_top + border.top.get() as f32 + 18.0;
+        let left_pixel_x = padding_left + x_adjust + 10.0;
 
-        let top_pixel_y = top_bar_height + padding_top + border.top.get() as f32 + 250.0;
-        let left_pixel_x = padding_left + x_adjust + 4.0;
-
-        term_window.paint_pane2(&clonedPane, &mut layers, left_pixel_x, top_pixel_y, desired_pixel_width, 500.0, *self.top_row.borrow())?;
+        term_window.paint_pane2(&clonedPane, &mut layers, left_pixel_x + 15.0, top_pixel_y, desired_pixel_width - 35.0, 500.0, *top_row)?;
         //.context("paint_pane")?;
 
         Ok(Ref::map(self.element.borrow(), |v| {

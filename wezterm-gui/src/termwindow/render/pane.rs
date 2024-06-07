@@ -138,7 +138,7 @@ impl crate::TermWindow {
                 )
             } else {
                 (
-                    left_pixel_x - padding_left,
+                    left_pixel_x,// - padding_left,
                     //left_pixel_x + padding_left + border.left.get() as f32 - (cell_width / 2.0)
                     //    + (pos.left as f32 * cell_width),
                     cell_width,

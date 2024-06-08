@@ -83,6 +83,8 @@ pub mod resize;
 mod selection;
 pub mod spawn;
 pub mod webgpu;
+mod EricWindow;
+
 use crate::spawn::SpawnWhere;
 use prevcursor::PrevCursorPos;
 
@@ -3068,7 +3070,7 @@ impl TermWindow {
             ActivateCommandPalette => {
                 //let modal = crate::termwindow::palette::CommandPalette::new(self);
                 //self.set_modal(Rc::new(modal));
-                let modal2 = palette::EricWindow::new(self);
+                let modal2 = EricWindow::EricWindow::new(self);
                 self.set_modal(Rc::new(modal2));
             }
             PromptInputLine(args) => self.show_prompt_input_line(args),

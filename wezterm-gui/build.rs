@@ -1,11 +1,29 @@
+extern crate bindgen;
 fn main() {
+    use std::env;
+    use std::path::PathBuf;
     println!("cargo:rerun-if-changed=build.rs");
+
+    cc::Build::new()
+        .file("src/termwindow/fzf/fzf.c")
+        .compile("fzf");
+
+    let bindings = bindgen::Builder::default()
+        .header("src/termwindow/fzf/fzf.h")
+        .generate()
+        .expect("Unable to generate bindings");
+
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out_path.join("bindings.rs"))
+        .expect("Couldn't write bindings!");
 
     #[cfg(windows)]
     {
         use anyhow::Context as _;
         use std::io::Write;
         use std::path::Path;
+
         let profile = std::env::var("PROFILE").unwrap();
         let repo_dir = std::env::current_dir()
             .ok()

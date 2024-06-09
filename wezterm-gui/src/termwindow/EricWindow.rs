@@ -4,8 +4,11 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
+use std::sync::Arc;
+use std::thread;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use parking_lot::RwLock;
 
 use config::{Dimension, SrgbaTuple};
 use mux::pane::Pane;
@@ -16,7 +19,7 @@ use termwiz::color::ColorSpec::TrueColor;
 use termwiz::surface::Line;
 use wezterm_term::{KeyCode, KeyModifiers, MouseEvent, StableRowIndex};
 use window::color::LinearRgba;
-use window::Modifiers;
+use window::{Modifiers, WindowOps};
 
 use crate::termwindow::{DimensionContext, TermWindow};
 use crate::termwindow::box_model::*;
@@ -31,6 +34,7 @@ pub struct EricRow {
     pub brief: Cow<'static, str>,
     pub rowIndex: StableRowIndex,
     pub first_y: usize,
+    pub positions: Vec<u32>
 }
 pub struct EricWindow {
     element: RefCell<Option<Vec<ComputedElement>>>,
@@ -39,9 +43,11 @@ pub struct EricWindow {
     top_row: RefCell<StableRowIndex>,
     max_rows_on_screen: RefCell<usize>,
     commands: RefCell<Vec<(i64, EricRow)>>,
+    ms: RwLock<Vec<(i32, EricRow)>>,
     row_indexes: RefCell<Vec<EricRow>>,
     results_dirty: RefCell<bool>,
-    slab: * mut fzf_slab_t
+    slab: * mut fzf_slab_t,
+    fuzzy_searcher: Arc<FuzzySearcher>
 }
 
 impl EricWindow{
@@ -53,13 +59,81 @@ impl EricWindow{
                 selection: RefCell::new(String::new()),
                 row_indexes: RefCell::new(Vec::new()),
                 commands: RefCell::new(Vec::new()),
+                ms: RwLock::new(Vec::new()),
                 selected_row: RefCell::new(0),
                 top_row: RefCell::new(0),
                 max_rows_on_screen: RefCell::new(0),
                 results_dirty: RefCell::new(false),
-                slab: slab
+                slab: slab,
+                fuzzy_searcher: Arc::new(FuzzySearcher::new())
             }
         }
+    }
+
+    fn start_fuzzy_search(&self, term_window: &TermWindow) {
+        let selection = self.selection.borrow().clone();
+        match term_window.get_active_pane_or_overlay(){
+            Some(pn_value) => {
+                if(!selection.is_empty())
+                {
+                    let fuzzy_searcher_clone = Arc::clone(&self.fuzzy_searcher);
+                    fuzzy_searcher_clone.search(selection.as_ref(), pn_value, term_window);
+                }
+            },
+            None => {}
+        };
+        //let pn = term_window.get_active_pane_or_overlay();
+        //let window = term_window.window.as_ref().unwrap().clone();
+        //let self_clone = self.clone();
+        //let mut pattern_str = std::ffi::CString::new(selection.clone()).expect("CStr::from_bytes_with_nul failed");
+        //match pn {
+        //    Some(pn_value) => {
+        //        let pn_dim = pn_value.get_dimensions();
+        //        let rows = pn_dim.scrollback_rows as StableRowIndex;
+        //        let (_first_row, lines) = pn_value.get_lines(0..rows);
+
+        //        thread::spawn(move || {
+        //            unsafe {
+        //                let slab = fzf_make_default_slab();
+        //                let pattern = fzf_parse_pattern(
+        //                    fzf_case_types_CaseSmart,
+        //                    false,
+        //                    pattern_str.as_ptr() as *mut c_char,
+        //                    true,
+        //                );
+
+        //                let mut ms = vec![];
+
+        //                if !selection.is_empty() {
+        //                    for (idx, line) in lines.iter().enumerate() {
+        //                        let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+        //                        let ptr = c_string.as_ptr();
+        //                        let score = fzf_get_score(ptr as *const i8, pattern, slab);
+
+        //                        if score > 0 {
+        //                            let command = EricRow {
+        //                                brief: Cow::Owned(line.as_str().to_string()),
+        //                                rowIndex: _first_row + idx as StableRowIndex,
+        //                                first_y: 0,
+        //                            };
+        //                            ms.push((score.into(), command));
+        //                        }
+        //                    }
+        //                    ms.sort_by(|a: &(i32, EricRow), b: &(i32, EricRow)| a.0.cmp(&b.0).reverse());
+        //                    {
+        //                        //let mut ms_lock = self_clone.ms.write();
+        //                    //    *ms_lock = ms;
+        //                    }
+
+        //                    window.notify(crate::termwindow::TermWindowNotif::Apply(Box::new(move |myself| {
+        //                        myself.invalidate_modal();
+        //                    })));
+        //                }
+        //            }
+        //        });
+        //    },
+        //    None => {}
+        //}
     }
 
     fn updated_input(&self) {
@@ -346,70 +420,66 @@ impl Modal for EricWindow{
         let border = term_window.get_os_border();
         let top_pixel_y = (top_bar_height + padding_top + border.top.get() as f32) + (padding_height_pixels / 2.0);
 
+        self.start_fuzzy_search(term_window);
         let mut result_elements = vec![ ];
-        let matcher = SkimMatcherV2::default();
-        if(*self.results_dirty.borrow())
-        {
-            unsafe {
-                let mut pattern_str = std::ffi::CString::new(selection).expect("CStr::from_bytes_with_nul failed");
-                let pattern = fzf_parse_pattern(
-                    fzf_case_types_CaseSmart,
-                    false,
-                    pattern_str.as_ptr() as *mut c_char,
-                    true,
-                );
-                let mut ms = self.commands.borrow_mut();
-                ms.clear();
-                if (!selection.is_empty()) {
-                    let pn = term_window.get_active_pane_or_overlay();
-                    match pn {
-                        Some(pn_value) => {
-                            let pnDim = pn_value.get_dimensions();
-                            let rows = pnDim.scrollback_rows as StableRowIndex;
-                            let (_first_row, lines) = pn_value.get_lines(0..rows);
-                            for (idx, line) in lines.iter().enumerate() {
-                                let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
-                                let ptr =c_string.as_ptr();
-                                let score = fzf_get_score(ptr as *const i8, pattern, self.slab);
-                                if(score > 0) {
-                                    let command = EricRow {
-                                        brief: Cow::Owned(line.as_str().to_string()),
-                                        rowIndex: _first_row + idx as StableRowIndex,
-                                        first_y: 0
-                                    };
-                                    ms.push(((score as i32).into(), command));
-                                }
-                                //match matcher.fuzzy_match(line.as_str().as_ref(), selection.clone())
-                                //{
-                                //    Some(score) => {
-                                //        let command = EricRow {
-                                //            brief: Cow::Owned(line.as_str().to_string()),
-                                //            rowIndex: _first_row + idx as StableRowIndex,
-                                //            first_y: 0
-                                //        };
-                                //        ms.push((score, command));
-                                //    },
-                                //    None => {}
-                                //}
-                            }
-                        },
-                        None => {}
-                    }
-                    ms.sort_by(|a, b| a.0.cmp(&b.0).reverse());
-                    *self.results_dirty.borrow_mut() = false;
-                }
-            }
-        }
+        //let matcher = SkimMatcherV2::default();
+        //if(*self.results_dirty.borrow())
+        //{
+        //    unsafe {
+        //        let mut pattern_str = std::ffi::CString::new(selection).expect("CStr::from_bytes_with_nul failed");
+        //        let pattern = fzf_parse_pattern(
+        //            fzf_case_types_CaseSmart,
+        //            false,
+        //            pattern_str.as_ptr() as *mut c_char,
+        //            true,
+        //        );
+        //        let mut ms = self.commands.borrow_mut();
+        //        ms.clear();
+        //        if (!selection.is_empty()) {
+        //            let pn = term_window.get_active_pane_or_overlay();
+        //            match pn {
+        //                Some(pn_value) => {
+        //                    let pnDim = pn_value.get_dimensions();
+        //                    let rows = pnDim.scrollback_rows as StableRowIndex;
+        //                    let (_first_row, lines) = pn_value.get_lines(0..rows);
+        //                    for (idx, line) in lines.iter().enumerate() {
+        //                        let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+        //                        let ptr =c_string.as_ptr();
+        //                        let score = fzf_get_score(ptr as *const i8, pattern, self.slab);
+        //                        if(score > 0) {
+        //                            let command = EricRow {
+        //                                brief: Cow::Owned(line.as_str().to_string()),
+        //                                rowIndex: _first_row + idx as StableRowIndex,
+        //                                first_y: 0,
+        //                                positions: Vec::new()
+        //                            };
+        //                            ms.push(((score as i32).into(), command));
+        //                        }
+        //                    }
+        //                },
+        //                None => {}
+        //            }
+        //            ms.sort_by(|a, b| a.0.cmp(&b.0).reverse());
+        //            *self.results_dirty.borrow_mut() = false;
+        //        }
+        //    }
+        //}
+
+        //let mut top_row = self.top_row.borrow_mut();
+        //let mut commands = self.commands.borrow_mut();
+        //if(commands.iter().count() > 0)
+        //{
+        //    *top_row = commands[*self.selected_row.borrow()].1.rowIndex;
+        //}
 
         let mut top_row = self.top_row.borrow_mut();
-        let mut commands = self.commands.borrow_mut();
-        if(commands.iter().count() > 0)
+        let a = self.fuzzy_searcher.results.read().unwrap();
+        if(a.iter().count() > 0)
         {
-            *top_row = commands[*self.selected_row.borrow()].1.rowIndex;
+            *top_row = a[*self.selected_row.borrow()].rowIndex;
         }
-
-        for (display_idx, mut c) in commands.iter_mut().take(max_rows_on_screen).enumerate() {
-            let mut command = &mut c.1;
+        for (display_idx, mut c) in a.iter().take(max_rows_on_screen).enumerate() {
+            let mut command = &mut c;
             let solid_bg_color: InheritableColor = term_window
                 .config
                 .command_palette_bg_color
@@ -446,42 +516,48 @@ impl Modal for EricWindow{
             }
             let mut line = Line::from_text(&label, &attr, 0, None);
 
-            unsafe {
-                let mut pattern_str = std::ffi::CString::new(selection).expect("CStr::from_bytes_with_nul failed");
-                let pattern = fzf_parse_pattern(
-                    fzf_case_types_CaseSmart,
-                    false,
-                    pattern_str.as_ptr() as *mut c_char,
-                    true,
-                );
-                let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
-                let ptr = c_string.as_ptr();
-                let pos = fzf_get_positions(ptr, pattern, self.slab);
-                if(!pos.is_null())
-                {
-                    let s = core::slice::from_raw_parts((*pos).data, (*pos).size);
-                    for p in s {
-                        if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(*p as usize) {
-                            c.attrs_mut().set_foreground(color::AnsiColor::Red);
-                        }
-                    }
-                }
+            //unsafe {
+            //    let mut pattern_str = std::ffi::CString::new(selection).expect("CStr::from_bytes_with_nul failed");
+            //    let pattern = fzf_parse_pattern(
+            //        fzf_case_types_CaseSmart,
+            //        false,
+            //        pattern_str.as_ptr() as *mut c_char,
+            //        true,
+            //    );
+            //    let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+            //    let ptr = c_string.as_ptr();
+            //    let pos = fzf_get_positions(ptr, pattern, self.slab);
+            //    if(!pos.is_null())
+            //    {
+            //        let s = core::slice::from_raw_parts((*pos).data, (*pos).size);
+            //        for p in s {
+            //            if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(*p as usize) {
+            //                c.attrs_mut().set_foreground(color::AnsiColor::Red);
+            //            }
+            //        }
+            //    }
 
-                //let matcher = SkimMatcherV2::default();
-                //if let Some(pos) = matcher.fuzzy_indices(&label, selection.clone()) {
-                //    if let Some(first_index) = pos.1.get(0) {
-                //        command.first_y = *first_index;
-                //        for p in pos.1 {
-                //            if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(p) {
-                //                c.attrs_mut().set_foreground(color::AnsiColor::Red);
-                //            } else {
-                //                //println!("Cell at position {} not found.", p);
-                //            }
-                //        }
-                //    }
-                //} else {
-                //    //println!("No indices found.");
-                //}
+            //    //let matcher = SkimMatcherV2::default();
+            //    //if let Some(pos) = matcher.fuzzy_indices(&label, selection.clone()) {
+            //    //    if let Some(first_index) = pos.1.get(0) {
+            //    //        command.first_y = *first_index;
+            //    //        for p in pos.1 {
+            //    //            if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(p) {
+            //    //                c.attrs_mut().set_foreground(color::AnsiColor::Red);
+            //    //            } else {
+            //    //                //println!("Cell at position {} not found.", p);
+            //    //            }
+            //    //        }
+            //    //    }
+            //    //} else {
+            //    //    //println!("No indices found.");
+            //    //}
+            //}
+
+            for p in c.positions.iter() {
+                if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(*p as usize) {
+                    c.attrs_mut().set_foreground(color::AnsiColor::Red);
+                }
             }
 
             let row = vec![
@@ -584,5 +660,83 @@ impl Modal for EricWindow{
 
     fn reconfigure(&self, term_window: &mut TermWindow) {
         self.element.borrow_mut().take();
+    }
+}
+
+pub struct FuzzySearcher {
+    results: Arc<std::sync::RwLock<Vec<EricRow>>>
+}
+
+impl FuzzySearcher {
+    pub fn new() -> Self {
+        FuzzySearcher {
+            results: Arc::new(std::sync::RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn search(self: Arc<Self>, selection: &str, pane: Arc<dyn Pane>, term_window: &TermWindow) {
+        let selection_clone = selection.to_string();
+        let self_clone = Arc::new(self.clone());  // Wrap self in Arc
+        let window = term_window.window.as_ref().unwrap().clone();
+
+        thread::spawn(move || {
+            unsafe {
+                let pn_dim = pane.get_dimensions();
+                let rows = pn_dim.scrollback_rows as StableRowIndex;
+                let (_first_row, lines) = pane.get_lines(0..rows);
+                if !selection_clone.is_empty() {
+                    let pattern_str = std::ffi::CString::new(selection_clone).expect("CString::new failed");
+                    let slab = fzf_make_default_slab();
+                    let pattern = fzf_parse_pattern(
+                        0, // fzf_case_types_CaseSmart should be replaced with actual value
+                        false,
+                        pattern_str.as_ptr() as *mut i8,
+                        true,
+                    );
+
+                    let mut temp = vec![];
+                    let mut ms = vec![];
+                    for (idx, line) in lines.iter().enumerate() {
+                        let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+                        let ptr = c_string.as_ptr();
+                        let score = fzf_get_score(ptr, pattern, slab);
+
+                        if score > 0 {
+                            temp.push((score, _first_row + idx as StableRowIndex, line));
+                        }
+                    }
+
+                    temp.sort_by(|a, b| a.0.cmp(&b.0).reverse());
+                    for (display_idx, mut c) in temp.iter_mut().take(100).enumerate() {
+                        let line = c.2;
+                        let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+                        let ptr = c_string.as_ptr();
+                        let pos = fzf_get_positions(ptr, pattern, slab);
+                        if(!pos.is_null())
+                        {
+                            let s = core::slice::from_raw_parts((*pos).data, (*pos).size);
+                            let mut pos = vec![];
+                            for &p in s.iter() {
+                                pos.push(p);
+                            }
+                            let command = EricRow {
+                                brief: Cow::Owned(line.as_str().to_string()),
+                                rowIndex: c.1 as StableRowIndex,
+                                first_y: 0,
+                                positions: pos
+                            };
+                            ms.push(command);
+                        }
+                    }
+
+                    let mut results = self_clone.results.write().unwrap();
+                    *results = ms;
+
+                    window.notify(crate::termwindow::TermWindowNotif::Apply(Box::new(move |myself| {
+                        myself.invalidate_modal();
+                    })));
+                }
+            }
+        });
     }
 }

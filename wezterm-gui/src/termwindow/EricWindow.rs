@@ -1,13 +1,11 @@
-
-use std::ffi::{c_char, CStr};
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
-use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use parking_lot::RwLock;
 
 use config::{Dimension, SrgbaTuple};
@@ -45,7 +43,6 @@ pub struct EricWindow {
     commands: RefCell<Vec<(i64, EricRow)>>,
     ms: RwLock<Vec<(i32, EricRow)>>,
     row_indexes: RefCell<Vec<EricRow>>,
-    results_dirty: RefCell<bool>,
     slab: * mut fzf_slab_t,
     fuzzy_searcher: Arc<FuzzySearcher>
 }
@@ -54,6 +51,11 @@ impl EricWindow{
     pub fn new(term_window: &mut TermWindow) -> Self {
         unsafe {
             let slab = fzf_make_default_slab();
+
+            let pane = term_window.get_active_pane_or_overlay().unwrap();
+            let pn_dim = pane.get_dimensions();
+            let rows = pn_dim.scrollback_rows as StableRowIndex;
+            let (_first_row, lines) = pane.get_lines(0..rows);
             Self {
                 element: RefCell::new(None),
                 selection: RefCell::new(String::new()),
@@ -63,77 +65,22 @@ impl EricWindow{
                 selected_row: RefCell::new(0),
                 top_row: RefCell::new(0),
                 max_rows_on_screen: RefCell::new(0),
-                results_dirty: RefCell::new(false),
                 slab: slab,
-                fuzzy_searcher: Arc::new(FuzzySearcher::new())
+                fuzzy_searcher: FuzzySearcher::new((_first_row, lines))
             }
         }
     }
 
-    fn start_fuzzy_search(&self, term_window: &TermWindow) {
+    fn start_fuzzy_search(&self, term_window: &mut TermWindow) {
         let selection = self.selection.borrow().clone();
         match term_window.get_active_pane_or_overlay(){
             Some(pn_value) => {
-                if(!selection.is_empty())
-                {
-                    let fuzzy_searcher_clone = Arc::clone(&self.fuzzy_searcher);
-                    fuzzy_searcher_clone.search(selection.as_ref(), pn_value, term_window);
-                }
+                let fuzzy_searcher_clone = Arc::clone(&self.fuzzy_searcher);
+                fuzzy_searcher_clone.search(selection.as_ref(), pn_value, term_window);
+                term_window.invalidate_modal();
             },
             None => {}
         };
-        //let pn = term_window.get_active_pane_or_overlay();
-        //let window = term_window.window.as_ref().unwrap().clone();
-        //let self_clone = self.clone();
-        //let mut pattern_str = std::ffi::CString::new(selection.clone()).expect("CStr::from_bytes_with_nul failed");
-        //match pn {
-        //    Some(pn_value) => {
-        //        let pn_dim = pn_value.get_dimensions();
-        //        let rows = pn_dim.scrollback_rows as StableRowIndex;
-        //        let (_first_row, lines) = pn_value.get_lines(0..rows);
-
-        //        thread::spawn(move || {
-        //            unsafe {
-        //                let slab = fzf_make_default_slab();
-        //                let pattern = fzf_parse_pattern(
-        //                    fzf_case_types_CaseSmart,
-        //                    false,
-        //                    pattern_str.as_ptr() as *mut c_char,
-        //                    true,
-        //                );
-
-        //                let mut ms = vec![];
-
-        //                if !selection.is_empty() {
-        //                    for (idx, line) in lines.iter().enumerate() {
-        //                        let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
-        //                        let ptr = c_string.as_ptr();
-        //                        let score = fzf_get_score(ptr as *const i8, pattern, slab);
-
-        //                        if score > 0 {
-        //                            let command = EricRow {
-        //                                brief: Cow::Owned(line.as_str().to_string()),
-        //                                rowIndex: _first_row + idx as StableRowIndex,
-        //                                first_y: 0,
-        //                            };
-        //                            ms.push((score.into(), command));
-        //                        }
-        //                    }
-        //                    ms.sort_by(|a: &(i32, EricRow), b: &(i32, EricRow)| a.0.cmp(&b.0).reverse());
-        //                    {
-        //                        //let mut ms_lock = self_clone.ms.write();
-        //                    //    *ms_lock = ms;
-        //                    }
-
-        //                    window.notify(crate::termwindow::TermWindowNotif::Apply(Box::new(move |myself| {
-        //                        myself.invalidate_modal();
-        //                    })));
-        //                }
-        //            }
-        //        });
-        //    },
-        //    None => {}
-        //}
     }
 
     fn updated_input(&self) {
@@ -145,20 +92,20 @@ impl EricWindow{
         let mut row = self.selected_row.borrow_mut();
         *row = row.saturating_sub(1);
         let mut top_row = self.top_row.borrow_mut();
-        let commands = self.commands.borrow();
-        *top_row = commands[*row].1.rowIndex;
+        let commands = self.fuzzy_searcher.results.read().unwrap();
+        *top_row = commands[*row].rowIndex;
     }
 
     fn move_down(&self) {
         let mut row = self.selected_row.borrow_mut();
-        if(*row + 1 < self.commands.borrow().iter().count())
+        let commands = self.fuzzy_searcher.results.read().unwrap();
+        if(*row + 1 < commands.iter().count())
         {
             *row = row.saturating_add(1);
             let mut top_row = self.top_row.borrow_mut();
-            let commands = self.commands.borrow();
             if(*row < commands.iter().count())
             {
-                *top_row = commands[*row].1.rowIndex;
+                *top_row = commands[*row].rowIndex;
             }
         }
     }
@@ -218,20 +165,6 @@ impl EricWindow{
             .default_font()
             .expect("to resolve font");
 
-        let prompt_elements =
-            vec![
-                Element::new(&font, ElementContent::Text(format!("> {selection}_")))
-                    .colors(ElementColors {
-                        border: BorderColor::default(),
-                        bg: LinearRgba::TRANSPARENT.into(),
-                        text: term_window
-                            .config
-                            .command_palette_fg_color
-                            .to_linear()
-                            .into(),
-                    })
-                    .display(DisplayType::Block),
-            ];
         Element::new(&font, content)
             .colors(ElementColors {
                 border: BorderColor::default(),
@@ -298,9 +231,10 @@ impl Modal for EricWindow{
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 let mut row = self.selected_row.borrow_mut();
                 *row = row.saturating_sub(1);
-                let commands = self.commands.borrow();
-                let y = commands[*row].1.rowIndex + 1;
-                let x = commands[*row].1.first_y;
+
+                //let commands = self.commands.borrow();
+                let y = self.fuzzy_searcher.results.read().unwrap()[*row].rowIndex;;
+                let x = self.fuzzy_searcher.results.read().unwrap()[*row].first_y;
 
                 term_window.cancel_modal();
 
@@ -348,18 +282,20 @@ impl Modal for EricWindow{
                 self.move_down();
             }
             (KeyCode::Backspace, KeyModifiers::NONE) => {
-                // Backspace to edit the selection
-                let mut selection = self.selection.borrow_mut();
-                selection.pop();
+                {
+                    let mut selection = self.selection.borrow_mut();
+                    selection.pop();
+                }
                 self.updated_input();
+                self.start_fuzzy_search(term_window);
             }
             (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
                 {
                     let mut selection = self.selection.borrow_mut();
                     selection.push(c);
                 }
-                *self.results_dirty.borrow_mut() = true;
                 self.updated_input();
+                self.start_fuzzy_search(term_window);
             }
             _ => return Ok(false),
         }
@@ -369,9 +305,6 @@ impl Modal for EricWindow{
     fn computed_element(&self, term_window: &mut TermWindow) -> anyhow::Result<Ref<[ComputedElement]>> {
         let panes = term_window.get_panes_to_render();
         let mut cloned_pane = panes[0].clone();
-
-        let selection = self.selection.borrow();
-        let selection = selection.as_str();
 
         let font = term_window
             .fonts
@@ -420,57 +353,7 @@ impl Modal for EricWindow{
         let border = term_window.get_os_border();
         let top_pixel_y = (top_bar_height + padding_top + border.top.get() as f32) + (padding_height_pixels / 2.0);
 
-        self.start_fuzzy_search(term_window);
         let mut result_elements = vec![ ];
-        //let matcher = SkimMatcherV2::default();
-        //if(*self.results_dirty.borrow())
-        //{
-        //    unsafe {
-        //        let mut pattern_str = std::ffi::CString::new(selection).expect("CStr::from_bytes_with_nul failed");
-        //        let pattern = fzf_parse_pattern(
-        //            fzf_case_types_CaseSmart,
-        //            false,
-        //            pattern_str.as_ptr() as *mut c_char,
-        //            true,
-        //        );
-        //        let mut ms = self.commands.borrow_mut();
-        //        ms.clear();
-        //        if (!selection.is_empty()) {
-        //            let pn = term_window.get_active_pane_or_overlay();
-        //            match pn {
-        //                Some(pn_value) => {
-        //                    let pnDim = pn_value.get_dimensions();
-        //                    let rows = pnDim.scrollback_rows as StableRowIndex;
-        //                    let (_first_row, lines) = pn_value.get_lines(0..rows);
-        //                    for (idx, line) in lines.iter().enumerate() {
-        //                        let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
-        //                        let ptr =c_string.as_ptr();
-        //                        let score = fzf_get_score(ptr as *const i8, pattern, self.slab);
-        //                        if(score > 0) {
-        //                            let command = EricRow {
-        //                                brief: Cow::Owned(line.as_str().to_string()),
-        //                                rowIndex: _first_row + idx as StableRowIndex,
-        //                                first_y: 0,
-        //                                positions: Vec::new()
-        //                            };
-        //                            ms.push(((score as i32).into(), command));
-        //                        }
-        //                    }
-        //                },
-        //                None => {}
-        //            }
-        //            ms.sort_by(|a, b| a.0.cmp(&b.0).reverse());
-        //            *self.results_dirty.borrow_mut() = false;
-        //        }
-        //    }
-        //}
-
-        //let mut top_row = self.top_row.borrow_mut();
-        //let mut commands = self.commands.borrow_mut();
-        //if(commands.iter().count() > 0)
-        //{
-        //    *top_row = commands[*self.selected_row.borrow()].1.rowIndex;
-        //}
 
         let mut top_row = self.top_row.borrow_mut();
         let a = self.fuzzy_searcher.results.read().unwrap();
@@ -478,6 +361,7 @@ impl Modal for EricWindow{
         {
             *top_row = a[*self.selected_row.borrow()].rowIndex;
         }
+
         for (display_idx, mut c) in a.iter().take(max_rows_on_screen).enumerate() {
             let mut command = &mut c;
             let solid_bg_color: InheritableColor = term_window
@@ -515,44 +399,6 @@ impl Modal for EricWindow{
                 attr.set_foreground(TrueColor(*term_window.config.command_palette_fg_color));
             }
             let mut line = Line::from_text(&label, &attr, 0, None);
-
-            //unsafe {
-            //    let mut pattern_str = std::ffi::CString::new(selection).expect("CStr::from_bytes_with_nul failed");
-            //    let pattern = fzf_parse_pattern(
-            //        fzf_case_types_CaseSmart,
-            //        false,
-            //        pattern_str.as_ptr() as *mut c_char,
-            //        true,
-            //    );
-            //    let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
-            //    let ptr = c_string.as_ptr();
-            //    let pos = fzf_get_positions(ptr, pattern, self.slab);
-            //    if(!pos.is_null())
-            //    {
-            //        let s = core::slice::from_raw_parts((*pos).data, (*pos).size);
-            //        for p in s {
-            //            if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(*p as usize) {
-            //                c.attrs_mut().set_foreground(color::AnsiColor::Red);
-            //            }
-            //        }
-            //    }
-
-            //    //let matcher = SkimMatcherV2::default();
-            //    //if let Some(pos) = matcher.fuzzy_indices(&label, selection.clone()) {
-            //    //    if let Some(first_index) = pos.1.get(0) {
-            //    //        command.first_y = *first_index;
-            //    //        for p in pos.1 {
-            //    //            if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(p) {
-            //    //                c.attrs_mut().set_foreground(color::AnsiColor::Red);
-            //    //            } else {
-            //    //                //println!("Cell at position {} not found.", p);
-            //    //            }
-            //    //        }
-            //    //    }
-            //    //} else {
-            //    //    //println!("No indices found.");
-            //    //}
-            //}
 
             for p in c.positions.iter() {
                 if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(*p as usize) {
@@ -662,81 +508,194 @@ impl Modal for EricWindow{
         self.element.borrow_mut().take();
     }
 }
+impl Drop for EricWindow {
+    fn drop(&mut self) {
+        // Signal the fuzzy searcher to stop
+        self.fuzzy_searcher.cancel_flag.store(true, Ordering::SeqCst);
+        let strong_count = Arc::strong_count(&self.fuzzy_searcher);
+        println!("EricWindow strong count after drop: {}", strong_count);
+
+        //self.fuzzy_searcher.stop();
+
+        let strong_count = Arc::strong_count(&self.fuzzy_searcher);
+        println!("EricWindow strong count after drop: {}", strong_count);
+
+        // Perform additional cleanup if necessary
+        // For example, if `fzf_slab_t` needs to be manually deallocated, do it here
+        unsafe {
+            if !self.slab.is_null() {
+                // Assuming there is a function to free the slab, such as `fzf_free_slab`
+                fzf_free_slab(self.slab);
+                self.slab = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+pub struct TermWindowWrapper {
+    inner: Arc<TermWindow>,
+}
+
+impl TermWindowWrapper {
+    pub fn new(term_window: TermWindow) -> Self {
+        TermWindowWrapper {
+            inner: Arc::new(term_window),
+        }
+    }
+
+    pub fn get_inner(&self) -> Arc<TermWindow> {
+        Arc::clone(&self.inner)
+    }
+}
+
+
+struct SearchTask {
+    selection: String,
+    pane: Arc<dyn Pane>,
+    //term_window: Arc<TermWindow>, // Change Rc to Arc
+}
 
 pub struct FuzzySearcher {
-    results: Arc<std::sync::RwLock<Vec<EricRow>>>
+    results: Arc<std::sync::RwLock<Vec<EricRow>>>,
+    cancel_flag: Arc<AtomicBool>,
+    task_sender: Arc<Mutex<Sender<SearchTask>>>,
+    lines: (StableRowIndex, Vec<Line>),
+    task_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl FuzzySearcher {
-    pub fn new() -> Self {
-        FuzzySearcher {
+    pub fn new(lines: (StableRowIndex, Vec<Line>)) -> Arc<Self> {
+        let (task_sender, task_receiver) = mpsc::channel();
+
+        let mut searcher = Arc::new(FuzzySearcher {
             results: Arc::new(std::sync::RwLock::new(Vec::new())),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            task_sender: Arc::new(Mutex::new(task_sender)),
+            lines,
+            task_thread: Arc::new(Mutex::new(None))
+        });
+
+        searcher
+    }
+    pub fn stop(&mut self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.task_thread.lock().unwrap().take() {
+            let _ = thread.join();
+        }
+    }
+
+    fn worker_thread(self: Arc<Self>, task_receiver: Receiver<SearchTask>) {
+        for task in task_receiver {
+            let self_clone = Arc::clone(&self);
+            self_clone.cancel_flag.store(false, Ordering::SeqCst);
+            self_clone.perform_search(task.selection, task.pane);
+        }
+    }
+
+    fn perform_search(self: Arc<Self>, selection: String, pane: Arc<dyn Pane>) {
+        let cancel_flag_clone = Arc::clone(&self.cancel_flag);
+
+        unsafe {
+            let pn_dim = pane.get_dimensions();
+            let rows = pn_dim.scrollback_rows as StableRowIndex;
+            let (_first_row, lines) = self.lines.clone();
+            if !selection.is_empty() {
+                let pattern_str = std::ffi::CString::new(selection).expect("CString::new failed");
+                let slab = fzf_make_default_slab();
+                let pattern = fzf_parse_pattern(
+                    0, // Replace with actual value
+                    false,
+                    pattern_str.as_ptr() as *mut i8,
+                    true,
+                );
+
+                let mut temp = vec![];
+                for (idx, line) in lines.iter().enumerate() {
+                    if cancel_flag_clone.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+                    let ptr = c_string.as_ptr();
+                    let score = fzf_get_score(ptr, pattern, slab);
+
+                    if score > 0 {
+                        temp.push((score, _first_row + idx as StableRowIndex, line));
+                    }
+                }
+
+                let mut ms = vec![];
+                temp.sort_by(|a, b| a.0.cmp(&b.0).reverse());
+                for (display_idx, mut c) in temp.iter_mut().take(100).enumerate() {
+                    let line = c.2;
+                    let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+                    let ptr = c_string.as_ptr();
+                    let pos = fzf_get_positions(ptr, pattern, slab);
+                    if !pos.is_null() {
+                        let s = core::slice::from_raw_parts((*pos).data, (*pos).size);
+                        let mut posVec = vec![];
+                        for &p in s.iter() {
+                            posVec.push(p);
+                        }
+                        fzf_free_positions(pos);
+
+                        let first_y: usize = *posVec.last().unwrap_or(&0) as usize;
+                        let command = EricRow {
+                            brief: Cow::Owned(line.as_str().to_string()),
+                            rowIndex: c.1 as StableRowIndex,
+                            first_y: first_y,
+                            positions: posVec,
+                        };
+                        ms.push(command);
+                    }
+                }
+
+                fzf_free_pattern(pattern);
+                fzf_free_slab(slab);
+
+                if cancel_flag_clone.load(Ordering::SeqCst) {
+                    return;
+                }
+
+                let mut results = self.results.write().unwrap();
+                *results = ms;
+            }
         }
     }
 
     pub fn search(self: Arc<Self>, selection: &str, pane: Arc<dyn Pane>, term_window: &TermWindow) {
-        let selection_clone = selection.to_string();
-        let self_clone = Arc::new(self.clone());  // Wrap self in Arc
-        let window = term_window.window.as_ref().unwrap().clone();
+        self.cancel_flag.store(true, Ordering::SeqCst);
 
-        thread::spawn(move || {
-            unsafe {
-                let pn_dim = pane.get_dimensions();
-                let rows = pn_dim.scrollback_rows as StableRowIndex;
-                let (_first_row, lines) = pane.get_lines(0..rows);
-                if !selection_clone.is_empty() {
-                    let pattern_str = std::ffi::CString::new(selection_clone).expect("CString::new failed");
-                    let slab = fzf_make_default_slab();
-                    let pattern = fzf_parse_pattern(
-                        0, // fzf_case_types_CaseSmart should be replaced with actual value
-                        false,
-                        pattern_str.as_ptr() as *mut i8,
-                        true,
-                    );
+        let task = SearchTask {
+            selection: selection.to_string(),
+            pane,
+        };
 
-                    let mut temp = vec![];
-                    let mut ms = vec![];
-                    for (idx, line) in lines.iter().enumerate() {
-                        let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
-                        let ptr = c_string.as_ptr();
-                        let score = fzf_get_score(ptr, pattern, slab);
+        if selection.is_empty() {
+            self.results.write().unwrap().clear();
+        } else {
+            let self_clone = Arc::clone(&self);
+            thread::spawn(move || {
+                self_clone.cancel_flag.store(false, Ordering::SeqCst);
+                self_clone.perform_search(task.selection, task.pane);
+            });
+        }
+    }
+}
 
-                        if score > 0 {
-                            temp.push((score, _first_row + idx as StableRowIndex, line));
-                        }
-                    }
-
-                    temp.sort_by(|a, b| a.0.cmp(&b.0).reverse());
-                    for (display_idx, mut c) in temp.iter_mut().take(100).enumerate() {
-                        let line = c.2;
-                        let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
-                        let ptr = c_string.as_ptr();
-                        let pos = fzf_get_positions(ptr, pattern, slab);
-                        if(!pos.is_null())
-                        {
-                            let s = core::slice::from_raw_parts((*pos).data, (*pos).size);
-                            let mut pos = vec![];
-                            for &p in s.iter() {
-                                pos.push(p);
-                            }
-                            let command = EricRow {
-                                brief: Cow::Owned(line.as_str().to_string()),
-                                rowIndex: c.1 as StableRowIndex,
-                                first_y: 0,
-                                positions: pos
-                            };
-                            ms.push(command);
-                        }
-                    }
-
-                    let mut results = self_clone.results.write().unwrap();
-                    *results = ms;
-
-                    window.notify(crate::termwindow::TermWindowNotif::Apply(Box::new(move |myself| {
-                        myself.invalidate_modal();
-                    })));
-                }
-            }
-        });
+impl Clone for FuzzySearcher {
+    fn clone(&self) -> Self {
+        FuzzySearcher {
+            results: Arc::clone(&self.results),
+            cancel_flag: Arc::clone(&self.cancel_flag),
+            task_sender: Arc::clone(&self.task_sender),
+            lines: self.lines.clone(),
+            task_thread: Arc::new(Mutex::new(None))
+        }
+    }
+}
+impl Drop for FuzzySearcher {
+    fn drop(&mut self) {
+        // Signal the worker thread to stop and wait for it to finish
+        println!("FuzzySearch drop");
     }
 }

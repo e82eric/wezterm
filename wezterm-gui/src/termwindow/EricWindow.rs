@@ -43,15 +43,12 @@ pub struct EricWindow {
     commands: RefCell<Vec<(i64, EricRow)>>,
     ms: RwLock<Vec<(i32, EricRow)>>,
     row_indexes: RefCell<Vec<EricRow>>,
-    slab: * mut fzf_slab_t,
     fuzzy_searcher: Arc<FuzzySearcher>
 }
 
 impl EricWindow{
     pub fn new(term_window: &mut TermWindow) -> Self {
         unsafe {
-            let slab = fzf_make_default_slab();
-
             let pane = term_window.get_active_pane_or_overlay().unwrap();
             let pn_dim = pane.get_dimensions();
             let rows = pn_dim.scrollback_rows as StableRowIndex;
@@ -65,7 +62,6 @@ impl EricWindow{
                 selected_row: RefCell::new(0),
                 top_row: RefCell::new(0),
                 max_rows_on_screen: RefCell::new(0),
-                slab: slab,
                 fuzzy_searcher: FuzzySearcher::new((_first_row, lines))
             }
         }
@@ -158,8 +154,6 @@ impl EricWindow{
         border_color: BorderColor,
         content: ElementContent
     ) -> Element {
-        let selection = self.selection.borrow();
-        let selection = selection.as_str();
         let font = term_window
             .fonts
             .default_font()
@@ -173,7 +167,7 @@ impl EricWindow{
             })
             .colors(ElementColors {
                 border: border_color,
-                bg: term_window.config.command_palette_bg_color.to_linear().into(),
+                bg: background_color.into(),
                 text: term_window.config.command_palette_fg_color.to_linear().into(),
             })
             .margin(BoxDimension {
@@ -508,46 +502,6 @@ impl Modal for EricWindow{
         self.element.borrow_mut().take();
     }
 }
-impl Drop for EricWindow {
-    fn drop(&mut self) {
-        // Signal the fuzzy searcher to stop
-        self.fuzzy_searcher.cancel_flag.store(true, Ordering::SeqCst);
-        let strong_count = Arc::strong_count(&self.fuzzy_searcher);
-        println!("EricWindow strong count after drop: {}", strong_count);
-
-        //self.fuzzy_searcher.stop();
-
-        let strong_count = Arc::strong_count(&self.fuzzy_searcher);
-        println!("EricWindow strong count after drop: {}", strong_count);
-
-        // Perform additional cleanup if necessary
-        // For example, if `fzf_slab_t` needs to be manually deallocated, do it here
-        unsafe {
-            if !self.slab.is_null() {
-                // Assuming there is a function to free the slab, such as `fzf_free_slab`
-                fzf_free_slab(self.slab);
-                self.slab = std::ptr::null_mut();
-            }
-        }
-    }
-}
-
-pub struct TermWindowWrapper {
-    inner: Arc<TermWindow>,
-}
-
-impl TermWindowWrapper {
-    pub fn new(term_window: TermWindow) -> Self {
-        TermWindowWrapper {
-            inner: Arc::new(term_window),
-        }
-    }
-
-    pub fn get_inner(&self) -> Arc<TermWindow> {
-        Arc::clone(&self.inner)
-    }
-}
-
 
 struct SearchTask {
     selection: String,
@@ -691,11 +645,5 @@ impl Clone for FuzzySearcher {
             lines: self.lines.clone(),
             task_thread: Arc::new(Mutex::new(None))
         }
-    }
-}
-impl Drop for FuzzySearcher {
-    fn drop(&mut self) {
-        // Signal the worker thread to stop and wait for it to finish
-        println!("FuzzySearch drop");
     }
 }

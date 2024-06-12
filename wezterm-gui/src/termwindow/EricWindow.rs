@@ -9,7 +9,7 @@ use std::thread;
 use parking_lot::RwLock;
 
 use config::{Dimension, SrgbaTuple};
-use mux::pane::Pane;
+use mux::pane::{LogicalLine, Pane};
 use mux::pane::Pattern::CaseInSensitiveString;
 use termwiz::cell::CellAttributes;
 use termwiz::color;
@@ -29,8 +29,7 @@ use crate::termwindow::render::corners::{
 use crate::utilsprites::RenderMetrics;
 
 pub struct EricRow {
-    pub brief: Cow<'static, str>,
-    pub rowIndex: StableRowIndex,
+    pub row_index: StableRowIndex,
     pub first_y: usize,
     pub positions: Vec<u32>
 }
@@ -40,7 +39,6 @@ pub struct EricWindow {
     selected_row: RefCell<usize>,
     top_row: RefCell<StableRowIndex>,
     max_rows_on_screen: RefCell<usize>,
-    commands: RefCell<Vec<(i64, EricRow)>>,
     ms: RwLock<Vec<(i32, EricRow)>>,
     row_indexes: RefCell<Vec<EricRow>>,
     fuzzy_searcher: Arc<FuzzySearcher>
@@ -52,17 +50,18 @@ impl EricWindow{
             let pane = term_window.get_active_pane_or_overlay().unwrap();
             let pn_dim = pane.get_dimensions();
             let rows = pn_dim.scrollback_rows as StableRowIndex;
+
+            let logical_lines = pane.get_logical_lines(0..rows);
             let (_first_row, lines) = pane.get_lines(0..rows);
             Self {
                 element: RefCell::new(None),
                 selection: RefCell::new(String::new()),
                 row_indexes: RefCell::new(Vec::new()),
-                commands: RefCell::new(Vec::new()),
                 ms: RwLock::new(Vec::new()),
                 selected_row: RefCell::new(0),
                 top_row: RefCell::new(0),
                 max_rows_on_screen: RefCell::new(0),
-                fuzzy_searcher: FuzzySearcher::new((_first_row, lines))
+                fuzzy_searcher: FuzzySearcher::new(logical_lines),
             }
         }
     }
@@ -89,7 +88,7 @@ impl EricWindow{
         *row = row.saturating_sub(1);
         let mut top_row = self.top_row.borrow_mut();
         let commands = self.fuzzy_searcher.results.read().unwrap();
-        *top_row = commands[*row].rowIndex;
+        *top_row = commands[*row].row_index;
     }
 
     fn move_down(&self) {
@@ -101,7 +100,7 @@ impl EricWindow{
             let mut top_row = self.top_row.borrow_mut();
             if(*row < commands.iter().count())
             {
-                *top_row = commands[*row].rowIndex;
+                *top_row = commands[*row].row_index;
             }
         }
     }
@@ -227,7 +226,7 @@ impl Modal for EricWindow{
                 *row = row.saturating_sub(1);
 
                 //let commands = self.commands.borrow();
-                let y = self.fuzzy_searcher.results.read().unwrap()[*row].rowIndex;;
+                let y = self.fuzzy_searcher.results.read().unwrap()[*row].row_index;;
                 let x = self.fuzzy_searcher.results.read().unwrap()[*row].first_y;
 
                 term_window.cancel_modal();
@@ -308,6 +307,7 @@ impl Modal for EricWindow{
         let dimensions = term_window.dimensions;
         let size = term_window.terminal_size;
 
+        let (padding_left, padding_top) = term_window.padding_left_top();
         let padding_width_percent = 0.15;
         let padding_width_cols = (size.cols as f32 * padding_width_percent) as usize;
         let desired_width = (size.cols - padding_width_cols).min(size.cols);
@@ -315,7 +315,6 @@ impl Modal for EricWindow{
             size.cols as f32 * term_window.render_metrics.cell_size.width as f32;
         let desired_pixel_width =
             desired_width as f32 * term_window.render_metrics.cell_size.width as f32;
-        let x_adjust = (avail_pixel_width - desired_pixel_width) / 2.0;
         let panel_width = desired_pixel_width;
 
         let panel_margin_percent = 0.25;
@@ -325,12 +324,19 @@ impl Modal for EricWindow{
         let panel_border_pixels = 2.0;
         let prompt_element_height = font.metrics().cell_height.0 as f32 + panel_margin_pixels + panel_padding_pixels + panel_border_pixels;
 
+        let x_adjust =  padding_left + ((avail_pixel_width - desired_pixel_width) / 2.0);
         let background_color = cloned_pane.pane.palette().background.to_linear();
         let prompt_element = self.create_prompt_element(term_window, panel_width, background_color);
 
-        let padding_height_percent = 0.05;
-        let padding_height_pixels = dimensions.pixel_height as f32 * padding_height_percent;
-        let full_height = (dimensions.pixel_height as f32) - (padding_height_pixels * 2.0);
+        let top_bar_height = if term_window.show_tab_bar && !term_window.config.tab_bar_at_bottom {
+            term_window.tab_bar_pixel_height().unwrap()
+        } else {
+            0.
+        };
+
+        let padding_height_percent = 0.10;
+        let padding_height_pixels = (dimensions.pixel_height as f32 - top_bar_height) * padding_height_percent;
+        let full_height = (dimensions.pixel_height as f32) - (padding_height_pixels * 2.0) - top_bar_height;
         let half_height = ((full_height - prompt_element_height - (panel_padding_pixels * 2.0)  - (panel_margin_percent * 2.0)) / 2.0).floor();
 
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
@@ -338,14 +344,8 @@ impl Modal for EricWindow{
         *self.max_rows_on_screen.borrow_mut() = max_rows_on_screen;
         let size = term_window.terminal_size;
 
-        let top_bar_height = if term_window.show_tab_bar && !term_window.config.tab_bar_at_bottom {
-            term_window.tab_bar_pixel_height().unwrap()
-        } else {
-            0.
-        };
-        let (padding_left, padding_top) = term_window.padding_left_top();
         let border = term_window.get_os_border();
-        let top_pixel_y = (top_bar_height + padding_top + border.top.get() as f32) + (padding_height_pixels / 2.0);
+        let top_pixel_y = padding_top + top_bar_height + (padding_height_pixels / 2.0) + border.top.get() as f32;
 
         let mut result_elements = vec![ ];
 
@@ -353,7 +353,7 @@ impl Modal for EricWindow{
         let a = self.fuzzy_searcher.results.read().unwrap();
         if(a.iter().count() > 0)
         {
-            *top_row = a[*self.selected_row.borrow()].rowIndex;
+            *top_row = a[*self.selected_row.borrow()].row_index;
         }
 
         for (display_idx, mut c) in a.iter().take(max_rows_on_screen).enumerate() {
@@ -382,8 +382,6 @@ impl Modal for EricWindow{
                 (solid_bg_color.clone(), solid_fg_color.clone())
             };
 
-            let label = command.brief.to_string();
-
             let mut attr = CellAttributes::default();
             if(display_idx == selected_row)
             {
@@ -392,34 +390,43 @@ impl Modal for EricWindow{
             else {
                 attr.set_foreground(TrueColor(*term_window.config.command_palette_fg_color));
             }
-            let mut line = Line::from_text(&label, &attr, 0, None);
 
-            for p in c.positions.iter() {
-                if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(*p as usize) {
-                    c.attrs_mut().set_foreground(color::AnsiColor::Red);
+            let logical_rows = &cloned_pane.pane.get_logical_lines(command.row_index..command.row_index + 1);
+            if let Some(logical_row) = logical_rows.first() {
+                for line in &logical_row.physical_lines {
+
+                    let label_str = line.as_str();
+                    let mut line = Line::from_text(&label_str, &attr, 0, None);
+
+                    for p in c.positions.iter() {
+                        if let Some(c) = line.cells_mut_for_attr_changes_only().get_mut(*p as usize) {
+                            c.attrs_mut().set_foreground(color::AnsiColor::Red);
+                        }
+                    }
+
+                    let row = vec![
+                        Element::with_line(&font, &line, &term_window.palette().clone()),
+                    ];
+
+                    result_elements.push(
+                        Element::new(&font, ElementContent::Children(row))
+                            .colors(ElementColors {
+                                border: BorderColor::default(),
+                                bg: bg.clone(),
+                                text: text.clone(),
+                            })
+                            .padding(BoxDimension {
+                                left: Dimension::Cells(0.25),
+                                right: Dimension::Cells(0.25),
+                                top: Dimension::Cells(0.),
+                                bottom: Dimension::Cells(0.),
+                            })
+                            .min_width(Some(Dimension::Percent(1.)))
+                            .display(DisplayType::Block),
+                    );
                 }
+            } else {
             }
-
-            let row = vec![
-                Element::with_line(&font, &line, &term_window.palette().clone()),
-            ];
-
-            result_elements.push(
-                Element::new(&font, ElementContent::Children(row))
-                    .colors(ElementColors {
-                        border: BorderColor::default(),
-                        bg,
-                        text,
-                    })
-                    .padding(BoxDimension {
-                        left: Dimension::Cells(0.25),
-                        right: Dimension::Cells(0.25),
-                        top: Dimension::Cells(0.),
-                        bottom: Dimension::Cells(0.),
-                    })
-                    .min_width(Some(Dimension::Percent(1.)))
-                    .display(DisplayType::Block),
-            );
         }
 
         let results_element = self.create_panel_element(
@@ -464,7 +471,7 @@ impl Modal for EricWindow{
                     pixel_cell: metrics.cell_size.height as f32,
                 },
                 bounds: euclid::rect(
-                    padding_left + x_adjust,
+                    x_adjust,
                     top_pixel_y,
                     desired_pixel_width,
                     size.rows as f32 * term_window.render_metrics.cell_size.height as f32,
@@ -484,14 +491,15 @@ impl Modal for EricWindow{
 
         cloned_pane.left = cloned_pane.left;
 
-        let inner_panel_padding = (panel_margin_pixels + panel_padding_pixels + panel_border_pixels + padding_left) * 2.0;
+        let inner_panel_padding = (panel_margin_pixels + panel_padding_pixels + panel_border_pixels) * 2.0;
         term_window.paint_pane2(
             &cloned_pane,
             &mut layers,
-            x_adjust + inner_panel_padding,
-            top_pixel_y + inner_panel_padding,
-            desired_pixel_width - (inner_panel_padding),
-            half_height, *top_row)?;
+            x_adjust + inner_panel_padding + padding_left,
+            top_pixel_y + inner_panel_padding + padding_top,
+            desired_pixel_width - inner_panel_padding,
+            half_height,
+            *top_row)?;
 
         Ok(Ref::map(self.element.borrow(), |v| {
             v.as_ref().unwrap().as_slice()
@@ -513,12 +521,12 @@ pub struct FuzzySearcher {
     results: Arc<std::sync::RwLock<Vec<EricRow>>>,
     cancel_flag: Arc<AtomicBool>,
     task_sender: Arc<Mutex<Sender<SearchTask>>>,
-    lines: (StableRowIndex, Vec<Line>),
+    lines: Vec<LogicalLine>,
     task_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl FuzzySearcher {
-    pub fn new(lines: (StableRowIndex, Vec<Line>)) -> Arc<Self> {
+    pub fn new(lines: Vec<LogicalLine>) -> Arc<Self> {
         let (task_sender, task_receiver) = mpsc::channel();
 
         let mut searcher = Arc::new(FuzzySearcher {
@@ -552,7 +560,7 @@ impl FuzzySearcher {
         unsafe {
             let pn_dim = pane.get_dimensions();
             let rows = pn_dim.scrollback_rows as StableRowIndex;
-            let (_first_row, lines) = self.lines.clone();
+            let _first_row = 0;
             if !selection.is_empty() {
                 let pattern_str = std::ffi::CString::new(selection).expect("CString::new failed");
                 let slab = fzf_make_default_slab();
@@ -564,26 +572,26 @@ impl FuzzySearcher {
                 );
 
                 let mut temp = vec![];
-                for (idx, line) in lines.iter().enumerate() {
+                for (idx, line) in self.lines.iter().enumerate() {
                     if cancel_flag_clone.load(Ordering::SeqCst) {
                         return;
                     }
-                    let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+                    let c_string = std::ffi::CString::new(line.logical.as_str().as_ref()).expect("CString::new failed");
                     let ptr = c_string.as_ptr();
                     let score = fzf_get_score(ptr, pattern, slab);
 
                     if score > 0 {
-                        temp.push((score, _first_row + idx as StableRowIndex, line));
+                        temp.push((score, _first_row + idx as StableRowIndex, c_string));
                     }
                 }
 
                 let mut ms = vec![];
                 temp.sort_by(|a, b| a.0.cmp(&b.0).reverse());
                 for (display_idx, mut c) in temp.iter_mut().take(100).enumerate() {
-                    let line = c.2;
-                    let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
-                    let ptr = c_string.as_ptr();
-                    let pos = fzf_get_positions(ptr, pattern, slab);
+                    //let line = c.2;
+                    //let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
+                    //let ptr = c_string.as_ptr();
+                    let pos = fzf_get_positions(c.2.as_ptr(), pattern, slab);
                     if !pos.is_null() {
                         let s = core::slice::from_raw_parts((*pos).data, (*pos).size);
                         let mut posVec = vec![];
@@ -594,8 +602,8 @@ impl FuzzySearcher {
 
                         let first_y: usize = *posVec.last().unwrap_or(&0) as usize;
                         let command = EricRow {
-                            brief: Cow::Owned(line.as_str().to_string()),
-                            rowIndex: c.1 as StableRowIndex,
+                            //brief: Cow::Owned(c.2),
+                            row_index: c.1 as StableRowIndex,
                             first_y: first_y,
                             positions: posVec,
                         };

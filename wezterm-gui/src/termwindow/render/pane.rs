@@ -91,10 +91,6 @@ impl crate::TermWindow {
         };
 
         let border = self.get_os_border();
-        //let top_pixel_y = top_bar_height + padding_top + border.top.get() as f32 + 100.0;
-        //let left_pixel_x = padding_left
-        //    + border.left.get() as f32
-        //    + (pos.left as f32 * self.render_metrics.cell_size.width as f32) + 100f32;
 
         let mut cursor = pos.pane.get_cursor_position();
         cursor.visibility = CursorVisibility::Hidden;
@@ -138,9 +134,7 @@ impl crate::TermWindow {
                 )
             } else {
                 (
-                    left_pixel_x,// - padding_left,
-                    //left_pixel_x + padding_left + border.left.get() as f32 - (cell_width / 2.0)
-                    //    + (pos.left as f32 * cell_width),
+                    left_pixel_x,
                     cell_width,
                 )
             };
@@ -152,7 +146,7 @@ impl crate::TermWindow {
                 )
             } else {
                 (
-                    top_pixel_y + (pos.top as f32 * cell_height) - (cell_height / 2.0),
+                    top_pixel_y,
                     cell_height,
                 )
             };

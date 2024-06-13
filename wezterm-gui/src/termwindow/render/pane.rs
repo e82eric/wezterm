@@ -39,7 +39,9 @@ impl crate::TermWindow {
         top_pixel_y: f32,
         width: f32,
         height: f32,
-        topRow: StableRowIndex
+        topRow: StableRowIndex,
+        cell_width: f32,
+        cols: usize
     ) -> anyhow::Result<()> {
         if self.config.use_box_model_render {
             return self.paint_pane_box_model(pos);
@@ -122,8 +124,9 @@ impl crate::TermWindow {
                 config.text_background_opacity
             });
 
-        let mut cell_width = self.render_metrics.cell_size.width as f32;
-        dims.cols = ((width) / cell_width) as usize;
+        //let mut cell_width = self.render_metrics.cell_size.width as f32;
+        //dims.cols = ((width) / cell_width) as usize;
+        dims.cols = cols;
         let cell_height = self.render_metrics.cell_size.height as f32;
         let background_rect = {
             // We want to fill out to the edges of the splits

@@ -333,10 +333,15 @@ impl Modal for EricWindow{
         let panel_decoration_pixels = (panel_margin_pixels + panel_padding_pixels) * 2.0;
 
         let proposed_content_width_pixels = dimensions.pixel_width as f32 - proposed_window_to_modal_padding_pixels - panel_decoration_pixels;
+        let proposed_full_height = dimensions.pixel_height as f32 - proposed_window_to_modal_padding_pixels - panel_decoration_pixels;
+        let proposed_half_height = ((proposed_full_height - prompt_element_height - panel_decoration_pixels) / 2.0).floor();
         let content_width_cells = (proposed_content_width_pixels / term_window.render_metrics.cell_size.width as f32).floor();
         let content_width_pixels = content_width_cells * term_window.render_metrics.cell_size.width as f32;
+        let content_height_cells = (proposed_half_height / term_window.render_metrics.cell_size.height as f32).floor();
+        let content_height_pixels = content_height_cells * term_window.render_metrics.cell_size.height as f32;
 
         let real_panel_width = content_width_pixels + panel_decoration_pixels;
+        let real_panel_height = content_height_pixels + panel_decoration_pixels;
         let real_modal_to_window_width_padding = (dimensions.pixel_width as f32 - real_panel_width) / 2.0;
 
         let x_adjust = real_modal_to_window_width_padding;
@@ -489,7 +494,7 @@ impl Modal for EricWindow{
         let results_element = self.create_panel_element(
             term_window,
             real_panel_width,
-            max_rows_on_screen as f32 * metrics.cell_size.height as f32,
+            real_panel_height,
             background_color,
             BorderColor::new(
                     term_window.config.command_palette_fg_color.to_linear().into(),
@@ -501,7 +506,7 @@ impl Modal for EricWindow{
         let preview_border_element = self.create_panel_element(
             term_window,
             real_panel_width,
-            half_height,
+            real_panel_height,
             background_color,
             BorderColor::new(
                     term_window.config.command_palette_fg_color.to_linear().into(),
@@ -514,7 +519,7 @@ impl Modal for EricWindow{
         let element = self.create_panel_element(
             term_window,
             real_panel_width,
-            full_height,
+            proposed_full_height,
             background_color,
             BorderColor::default(),
             ElementContent::Children(combined),
@@ -537,7 +542,7 @@ impl Modal for EricWindow{
                     x_adjust,
                     top_pixel_y,
                     real_panel_width,
-                    size.rows as f32 * term_window.render_metrics.cell_size.height as f32,
+                    proposed_full_height,
                 ),
                 metrics: &metrics,
                 gl_state: term_window.render_state.as_ref().unwrap(),
@@ -552,19 +557,16 @@ impl Modal for EricWindow{
             .layer_for_zindex(101)?;
         let mut layers = layer.quad_allocator();
 
-        cloned_pane.left = cloned_pane.left;
+        //cloned_pane.left = cloned_pane.left;
 
-        let inner_panel_padding = (panel_margin_pixels + panel_padding_pixels + panel_border_pixels) * 2.0;
         term_window.paint_pane2(
             &cloned_pane,
             &mut layers,
             x_adjust_content,
             top_pixel_y_content,
             content_width_pixels,
-            half_height,
-            *top_row,
-            term_window.render_metrics.cell_size.width as f32,
-            content_width_cells as usize)?;
+            content_height_pixels,
+            *top_row)?;
 
         Ok(Ref::map(self.element.borrow(), |v| {
             v.as_ref().unwrap().as_slice()

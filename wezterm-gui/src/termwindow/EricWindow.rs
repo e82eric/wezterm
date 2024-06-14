@@ -310,6 +310,7 @@ impl Modal for EricWindow{
         let avail_pixel_width =
             size.cols as f32 * term_window.render_metrics.cell_size.width as f32;
 
+
         let proposed_window_to_modal_padding_percent = 0.15;
         let proposed_window_to_modal_padding_pixels = dimensions.pixel_width as f32 * proposed_window_to_modal_padding_percent;
 
@@ -319,28 +320,57 @@ impl Modal for EricWindow{
         let desired_width = (size.cols - padding_width_cols).min(size.cols);
         let desired_pixel_width =
             desired_width as f32 * term_window.render_metrics.cell_size.width as f32;
-        let panel_width = desired_pixel_width;
 
-
-
-        let panel_margin_percent = 0.25;
-        let panel_margin_pixels = font.metrics().cell_height.0 as f32 * panel_margin_percent;
-        let panel_padding_percent = 0.25;
-        let panel_padding_pixels = font.metrics().cell_height.0 as f32 * panel_padding_percent as f32;
+        let panel_margin_percent = 0.50;
+        let panel_margin_pixels = term_window.render_metrics.cell_size.width as f32 * panel_margin_percent;
+        let panel_padding_percent = 0.50;
+        let panel_padding_pixels = term_window.render_metrics.cell_size.width as f32 * panel_padding_percent;
         let panel_border_pixels = 2.0;
         let prompt_element_height = font.metrics().cell_height.0 as f32 + panel_margin_pixels + panel_padding_pixels + panel_border_pixels;
-        let panel_decoration_pixels = (panel_margin_pixels + panel_padding_pixels + panel_border_pixels) * 2.0;
+        let panel_decoration_pixels = (panel_margin_pixels + panel_padding_pixels) * 2.0;
 
-        let proposed_content_width_pixels = dimensions.pixel_width as f32 - proposed_window_to_modal_padding_pixels - (panel_decoration_pixels * 2.0);
+        let proposed_content_width_pixels = dimensions.pixel_width as f32 - proposed_window_to_modal_padding_pixels - panel_decoration_pixels;
+        let proposed_full_height = dimensions.pixel_height as f32 - proposed_window_to_modal_padding_pixels - panel_decoration_pixels;
+        let proposed_half_height = ((proposed_full_height - prompt_element_height - panel_decoration_pixels) / 2.0).floor();
         let content_width_cells = (proposed_content_width_pixels / term_window.render_metrics.cell_size.width as f32).floor();
         let content_width_pixels = content_width_cells * term_window.render_metrics.cell_size.width as f32;
+        let content_height_cells = (proposed_half_height / term_window.render_metrics.cell_size.height as f32).floor();
+        let content_height_pixels = content_height_cells * term_window.render_metrics.cell_size.height as f32;
 
-        let real_panel_width = content_width_pixels + (panel_decoration_pixels * 2.0);
+        let real_panel_width = content_width_pixels + panel_decoration_pixels;
+        let real_panel_height = content_height_pixels + panel_decoration_pixels;
         let real_modal_to_window_width_padding = (dimensions.pixel_width as f32 - real_panel_width) / 2.0;
 
-        let x_adjust =  real_modal_to_window_width_padding;
+        let x_adjust = real_modal_to_window_width_padding;
+        let x_adjust_content = x_adjust + (panel_margin_pixels + panel_padding_pixels + panel_border_pixels + panel_border_pixels);
         let background_color = cloned_pane.pane.palette().background.to_linear();
-        let prompt_element = self.create_prompt_element(term_window, panel_width, background_color);
+
+        let selection = self.selection.borrow();
+        let selection = selection.as_str();
+        let prompt_elements =
+            vec![
+                Element::new(&font, ElementContent::Text(format!("> {selection}_")))
+                    .colors(ElementColors {
+                        border: BorderColor::default(),
+                        bg: LinearRgba::TRANSPARENT.into(),
+                        text: term_window
+                            .config
+                            .command_palette_fg_color
+                            .to_linear()
+                            .into(),
+                    })
+                    .display(DisplayType::Block),
+            ];
+        let prompt_element = self.create_panel_element(
+            term_window,
+            real_panel_width,
+            1.0,
+            background_color,
+            BorderColor::new(
+                term_window.config.command_palette_fg_color.to_linear().into(),
+            ),
+            ElementContent::Children(prompt_elements),
+        );
 
         let top_bar_height = if term_window.show_tab_bar && !term_window.config.tab_bar_at_bottom {
             term_window.tab_bar_pixel_height().unwrap()
@@ -509,7 +539,7 @@ impl Modal for EricWindow{
         term_window.paint_pane2(
             &cloned_pane,
             &mut layers,
-            x_adjust + panel_decoration_pixels + (panel_decoration_pixels / 4.0),
+            x_adjust_content,
             top_pixel_y + inner_panel_padding + padding_top,
             content_width_pixels,
             half_height,

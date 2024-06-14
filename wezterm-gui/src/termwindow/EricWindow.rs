@@ -398,7 +398,8 @@ impl Modal for EricWindow{
         let size = term_window.terminal_size;
 
         let border = term_window.get_os_border();
-        let top_pixel_y = padding_top + top_bar_height + (padding_height_pixels / 2.0) + border.top.get() as f32;
+        let top_pixel_y = padding_top + top_bar_height + real_modal_to_window_width_padding;
+        let top_pixel_y_content = top_pixel_y + (panel_decoration_pixels * 2.0) + panel_border_pixels;
 
         let mut result_elements = vec![ ];
 
@@ -560,7 +561,7 @@ impl Modal for EricWindow{
             &cloned_pane,
             &mut layers,
             x_adjust_content,
-            top_pixel_y + inner_panel_padding + padding_top,
+            top_pixel_y_content,
             content_width_pixels,
             half_height,
             *top_row)?;

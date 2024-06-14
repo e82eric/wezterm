@@ -141,6 +141,9 @@ impl EricWindow{
                     term_window.config.command_palette_fg_color.to_linear().into(),
                 ),
             ElementContent::Children(prompt_elements),
+            0.0,
+            0.0,
+            0.0
         )
     }
 
@@ -151,7 +154,10 @@ impl EricWindow{
         panel_height: f32,
         background_color: LinearRgba,
         border_color: BorderColor,
-        content: ElementContent
+        content: ElementContent,
+        margin_cell_percent: f32,
+        padding_cell_percent: f32,
+        border_pixels: f32
     ) -> Element {
         let font = term_window
             .fonts
@@ -170,18 +176,18 @@ impl EricWindow{
                 text: term_window.config.command_palette_fg_color.to_linear().into(),
             })
             .margin(BoxDimension {
-                left: Dimension::Cells(0.25),
-                right: Dimension::Cells(0.25),
-                top: Dimension::Cells(0.25),
-                bottom: Dimension::Cells(0.25),
+                left: Dimension::Cells(margin_cell_percent),
+                right: Dimension::Cells(margin_cell_percent),
+                top: Dimension::Cells(margin_cell_percent),
+                bottom: Dimension::Cells(margin_cell_percent),
             })
             .padding(BoxDimension {
-                left: Dimension::Cells(0.25),
-                right: Dimension::Cells(0.25),
-                top: Dimension::Cells(0.25),
-                bottom: Dimension::Cells(0.25),
+                left: Dimension::Cells(padding_cell_percent),
+                right: Dimension::Cells(padding_cell_percent),
+                top: Dimension::Cells(padding_cell_percent),
+                bottom: Dimension::Cells(padding_cell_percent),
             })
-            .border(BoxDimension::new(Dimension::Pixels(2.0)))
+            .border(BoxDimension::new(Dimension::Pixels(border_pixels)))
             .border_corners(Some(Corners {
                 top_left: SizedPoly {
                     width: Dimension::Cells(0.25),
@@ -370,6 +376,9 @@ impl Modal for EricWindow{
                 term_window.config.command_palette_fg_color.to_linear().into(),
             ),
             ElementContent::Children(prompt_elements),
+            panel_margin_percent,
+            panel_padding_percent,
+            2.0
         );
 
         let top_bar_height = if term_window.show_tab_bar && !term_window.config.tab_bar_at_bottom {
@@ -481,7 +490,11 @@ impl Modal for EricWindow{
             BorderColor::new(
                     term_window.config.command_palette_fg_color.to_linear().into(),
                 ),
-            ElementContent::Children(result_elements));
+            ElementContent::Children(result_elements),
+            panel_margin_percent,
+            panel_padding_percent,
+            2.0
+        );
 
         let preview_border_element = self.create_panel_element(
             term_window,
@@ -491,7 +504,11 @@ impl Modal for EricWindow{
             BorderColor::new(
                     term_window.config.command_palette_fg_color.to_linear().into(),
                 ),
-            ElementContent::Children(vec![]));
+            ElementContent::Children(vec![]),
+            panel_margin_percent,
+            panel_padding_percent,
+            2.0
+        );
 
         let combined = vec![preview_border_element, results_element, prompt_element];
         let element = self.create_panel_element(
@@ -500,7 +517,10 @@ impl Modal for EricWindow{
             full_height,
             background_color,
             BorderColor::default(),
-            ElementContent::Children(combined));
+            ElementContent::Children(combined),
+        0.0,
+        0.0,
+        0.0);
 
         let computed = term_window.compute_element(
             &LayoutContext {
@@ -517,7 +537,7 @@ impl Modal for EricWindow{
                 bounds: euclid::rect(
                     x_adjust,
                     top_pixel_y,
-                    desired_pixel_width,
+                    real_panel_width,
                     size.rows as f32 * term_window.render_metrics.cell_size.height as f32,
                 ),
                 metrics: &metrics,

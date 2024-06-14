@@ -333,7 +333,7 @@ impl Modal for EricWindow{
         let panel_padding_pixels = term_window.render_metrics.cell_size.width as f32 * panel_padding_percent;
         let panel_border_pixels = 2.0;
         let prompt_element_height = font.metrics().cell_height.0 as f32 + panel_margin_pixels + panel_border_pixels;
-        let panel_decoration_pixels = (panel_margin_pixels + panel_padding_pixels) * 2.0;
+        let panel_decoration_pixels = (panel_margin_pixels + panel_padding_pixels);
 
         let proposed_content_width_pixels = dimensions.pixel_width as f32 - proposed_window_to_modal_padding_pixels - panel_decoration_pixels;
         let proposed_full_height = dimensions.pixel_height as f32 - proposed_window_to_modal_padding_pixels - panel_decoration_pixels;
@@ -343,12 +343,12 @@ impl Modal for EricWindow{
         let content_height_cells = (proposed_half_height / term_window.render_metrics.cell_size.height as f32).floor();
         let content_height_pixels = content_height_cells * term_window.render_metrics.cell_size.height as f32;
 
-        let real_panel_width = content_width_pixels + panel_decoration_pixels;
+        let real_panel_width = content_width_pixels + (panel_decoration_pixels * 2.0) + panel_border_pixels + panel_border_pixels;
         let real_panel_height = content_height_pixels + panel_decoration_pixels;
         let real_modal_to_window_width_padding = (dimensions.pixel_width as f32 - real_panel_width) / 2.0;
 
         let x_adjust = real_modal_to_window_width_padding;
-        let x_adjust_content = x_adjust + ((panel_margin_pixels + panel_padding_pixels + panel_border_pixels) * 2.0);
+        let x_adjust_content = x_adjust + (panel_decoration_pixels  * 2.0) + panel_border_pixels;
         let background_color = cloned_pane.pane.palette().background.to_linear();
 
         let selection = self.selection.borrow();

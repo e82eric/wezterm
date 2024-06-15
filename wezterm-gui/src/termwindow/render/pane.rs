@@ -100,6 +100,7 @@ impl crate::TermWindow {
 
         let pane_id = pos.pane.pane_id();
         let current_viewport = self.get_viewport(pane_id);
+        let current_viewport = Some(topRow);
         let mut dims = pos.pane.get_dimensions().clone();
         dims.pixel_width = 400;
 
@@ -124,6 +125,8 @@ impl crate::TermWindow {
 
         let mut cell_width = self.render_metrics.cell_size.width as f32;
         dims.cols = ((width) / cell_width) as usize;
+        dims.viewport_rows = ((height) / self.render_metrics.cell_size.height as f32) as usize;
+        dims.physical_top = topRow;
         let cell_height = self.render_metrics.cell_size.height as f32;
         let background_rect = {
             // We want to fill out to the edges of the splits

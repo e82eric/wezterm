@@ -37,7 +37,7 @@ pub struct EricWindow {
     element: RefCell<Option<Vec<ComputedElement>>>,
     selection: RefCell<String>,
     selected_row: RefCell<usize>,
-    top_row: RefCell<StableRowIndex>,
+    top_row: RefCell<isize>,
     max_rows_on_screen: RefCell<usize>,
     ms: RwLock<Vec<(i32, EricRow)>>,
     row_indexes: RefCell<Vec<EricRow>>,
@@ -51,7 +51,6 @@ impl EricWindow{
             let pn_dim = pane.get_dimensions();
             let rows = pn_dim.scrollback_rows as StableRowIndex;
 
-            let logical_lines = pane.get_logical_lines(0..rows);
             let (_first_row, lines) = pane.get_lines(0..rows);
             Self {
                 element: RefCell::new(None),
@@ -61,7 +60,7 @@ impl EricWindow{
                 selected_row: RefCell::new(0),
                 top_row: RefCell::new(0),
                 max_rows_on_screen: RefCell::new(0),
-                fuzzy_searcher: FuzzySearcher::new(logical_lines),
+                fuzzy_searcher: FuzzySearcher::new(_first_row, lines),
             }
         }
     }
@@ -398,7 +397,8 @@ impl Modal for EricWindow{
         let size = term_window.terminal_size;
 
         let border = term_window.get_os_border();
-        let top_pixel_y = padding_top + top_bar_height + real_modal_to_window_width_padding;
+        let top_pixel_y = padding_top + top_bar_height + (padding_height_pixels / 2.0) + border.top.get() as f32;
+        //let top_pixel_y = padding_top + top_bar_height + real_modal_to_window_width_padding;
         let top_pixel_y_content = top_pixel_y + (panel_decoration_pixels * 2.0) + panel_border_pixels;
 
         let mut result_elements = vec![ ];
@@ -551,12 +551,9 @@ impl Modal for EricWindow{
 
         let gl_state = term_window.render_state.as_ref().unwrap();
         let layer = gl_state
-            .layer_for_zindex(101)?;
+            .layer_for_zindex(100)?;
         let mut layers = layer.quad_allocator();
 
-        cloned_pane.left = cloned_pane.left;
-
-        let inner_panel_padding = (panel_margin_pixels + panel_padding_pixels + panel_border_pixels) * 2.0;
         term_window.paint_pane2(
             &cloned_pane,
             &mut layers,
@@ -586,19 +583,19 @@ pub struct FuzzySearcher {
     results: Arc<std::sync::RwLock<Vec<EricRow>>>,
     cancel_flag: Arc<AtomicBool>,
     task_sender: Arc<Mutex<Sender<SearchTask>>>,
-    lines: Vec<LogicalLine>,
+    lines: (StableRowIndex, Vec<Line>),
     task_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl FuzzySearcher {
-    pub fn new(lines: Vec<LogicalLine>) -> Arc<Self> {
+    pub fn new(first_row_index: StableRowIndex, lines: Vec<Line>) -> Arc<Self> {
         let (task_sender, task_receiver) = mpsc::channel();
 
         let mut searcher = Arc::new(FuzzySearcher {
             results: Arc::new(std::sync::RwLock::new(Vec::new())),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             task_sender: Arc::new(Mutex::new(task_sender)),
-            lines,
+            lines: (first_row_index, lines),
             task_thread: Arc::new(Mutex::new(None))
         });
 
@@ -637,11 +634,11 @@ impl FuzzySearcher {
                 );
 
                 let mut temp = vec![];
-                for (idx, line) in self.lines.iter().enumerate() {
+                for (idx, line) in self.lines.1.iter().enumerate() {
                     if cancel_flag_clone.load(Ordering::SeqCst) {
                         return;
                     }
-                    let c_string = std::ffi::CString::new(line.logical.as_str().as_ref()).expect("CString::new failed");
+                    let c_string = std::ffi::CString::new(line.as_str().as_ref()).expect("CString::new failed");
                     let ptr = c_string.as_ptr();
                     let score = fzf_get_score(ptr, pattern, slab);
 

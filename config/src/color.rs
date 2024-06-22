@@ -170,6 +170,9 @@ pub struct Palette {
     pub quick_select_label_bg: Option<ColorSpec>,
     pub quick_select_match_fg: Option<ColorSpec>,
     pub quick_select_match_bg: Option<ColorSpec>,
+    pub quick_select_dim_bg: Option<ColorSpec>,
+    pub quick_select_dim_fg: Option<ColorSpec>,
+    pub quick_select_selection_match_fg: Option<ColorSpec>,
 }
 impl_lua_conversion_dynamic!(Palette);
 
@@ -219,6 +222,9 @@ impl Palette {
             quick_select_label_bg: overlay!(quick_select_label_bg),
             quick_select_match_fg: overlay!(quick_select_match_fg),
             quick_select_match_bg: overlay!(quick_select_match_bg),
+            quick_select_dim_bg: overlay!(quick_select_dim_bg),
+            quick_select_dim_fg: overlay!(quick_select_dim_fg),
+            quick_select_selection_match_fg: overlay!(quick_select_selection_match_fg)
         }
     }
 }

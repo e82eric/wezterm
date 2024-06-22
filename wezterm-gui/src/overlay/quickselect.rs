@@ -578,41 +578,65 @@ impl Pane for QuickSelectOverlay {
                     } else if let Some(matches) = self.renderer.by_line.get(&stable_idx) {
                         for m in matches {
                             // highlight
+                            let prefix_matches = self.renderer.selection.is_empty() || m.label.starts_with(&self.renderer.selection);
                             for cell_idx in m.range.clone() {
                                 if let Some(cell) =
                                     line.cells_mut_for_attr_changes_only().get_mut(cell_idx)
                                 {
-                                    cell.attrs_mut()
-                                        .set_background(
-                                            colors
-                                                .quick_select_match_bg
-                                                .unwrap_or(AnsiColor::Black.into()),
-                                        )
-                                        .set_foreground(
-                                            colors
-                                                .quick_select_match_fg
-                                                .unwrap_or(AnsiColor::Green.into()),
-                                        )
-                                        .set_reverse(false);
+                                    if prefix_matches {
+                                        cell.attrs_mut()
+                                            .set_background(
+                                                colors
+                                                    .quick_select_match_bg
+                                                    .unwrap_or(AnsiColor::Black.into()),
+                                            )
+                                            .set_foreground(
+                                                colors
+                                                    .quick_select_match_fg
+                                                    .unwrap_or(AnsiColor::Green.into()),
+                                            )
+                                            .set_reverse(false);
+                                    } else {
+                                        cell.attrs_mut()
+                                            .set_background(
+                                                colors
+                                                    .quick_select_match_bg
+                                                    .unwrap_or(AnsiColor::Black.into()),
+                                            )
+                                            .set_foreground(
+                                                colors
+                                                    .quick_select_dim_fg
+                                                    .unwrap_or(AnsiColor::Green.into()),
+                                            )
+                                            .set_reverse(false);
+
+                                    }
                                 }
                             }
+
+                            let mut ctr = 1;
                             for (idx, c) in m.label.chars().enumerate() {
                                 let mut attr = line
                                     .get_cell(idx)
                                     .map(|cell| cell.attrs().clone())
                                     .unwrap_or_else(|| CellAttributes::default());
-                                attr.set_background(
-                                    colors
-                                        .quick_select_label_bg
-                                        .unwrap_or(AnsiColor::Black.into()),
-                                )
-                                .set_foreground(
-                                    colors
-                                        .quick_select_label_fg
-                                        .unwrap_or(AnsiColor::Olive.into()),
-                                )
-                                .set_reverse(false);
-                                line.set_cell(m.range.start + idx, Cell::new(c, attr), SEQ_ZERO);
+                                if prefix_matches {
+                                    let fg_color = if ctr <= self.renderer.selection.len() {
+                                        colors.quick_select_selection_match_fg.unwrap_or(AnsiColor::Olive.into())
+                                    } else {
+                                        colors.quick_select_label_fg.unwrap_or(AnsiColor::Olive.into())
+                                    };
+
+                                    attr.set_background(
+                                        colors
+                                            .quick_select_label_bg
+                                            .unwrap_or(AnsiColor::Black.into()),
+                                    )
+                                        .set_foreground(fg_color)
+                                        .set_reverse(false);
+                                    line.set_cell(m.range.start + idx, Cell::new(c, attr), SEQ_ZERO);
+                                }
+                                ctr += 1;
                             }
                         }
                         line.clear_appdata();

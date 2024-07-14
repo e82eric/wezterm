@@ -749,6 +749,12 @@ impl Tab {
         self.inner.lock().get_float_size()
     }
 
+    pub fn clear_float_pane(
+        & self,
+    ) {
+        self.inner.lock().clear_float_pane();
+    }
+
     /// Split the pane that has pane_index in the given direction and assign
     /// the right/bottom pane of the newly created split to the provided Pane
     /// instance.  Returns the resultant index of the newly inserted pane.
@@ -1943,6 +1949,10 @@ impl TabInner {
             self.advise_focus_change(Some(pane));
         }
         None
+    }
+
+    fn clear_float_pane(& mut self) {
+        self.float_pane = None;
     }
 
     fn get_float_size(&self) -> TerminalSize {
